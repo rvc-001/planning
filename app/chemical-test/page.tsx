@@ -1,12 +1,9 @@
 "use client"
 
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { useState, useEffect, useCallback, useMemo } from "react"
 import { Loader2, AlertTriangle, Beaker, History, Settings, Eye } from "lucide-react"
 import { format } from "date-fns"
 import { useGoogleSheet, parseGvizDate } from "@/lib/g-sheets"
-
-// Shadcn UI components
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
@@ -17,8 +14,17 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } f
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 
-// --- Type Definitions ---
+// Configuration
+const WEB_APP_URL =
+  "https://script.google.com/macros/s/AKfycbwpDkP_Wmk8udmH6XsWPvpXgj-e3rGNxNJlOdAVXEWiCJWh3LI8CjIH4oJW5k5pjKFCvg/exec"
+const JOBCARDS_SHEET = "JobCards"
+const MASTER_SHEET = "Master"
+const PRODUCTION_SHEET = "Production"
+const ACTUAL_PRODUCTION_SHEET = "Actual Production"
+
+// Type Definitions
 interface RawMaterial {
   name: string
   quantity: number | string
@@ -33,12 +39,9 @@ interface PendingChemicalTestItem {
   expectedDeliveryDate: string
   priority: string
   dateOfProduction: string
-  supervisorName: string
   shift: string
   rawMaterials: RawMaterial[]
-  quantities: string
   machineHours: string
-  productionNotes: string
   labTest1Status: string
   labTest2Status: string
 }
@@ -48,7 +51,7 @@ interface HistoryChemicalTestItem {
   jobCardNo: string
   deliveryOrderNo: string
   quantity: number
-  test2Status: string
+  labTest2Status: string
   dateOfChemicalTest: string
   testedBy: string
   aluminaPercentage: string
@@ -58,29 +61,53 @@ interface HistoryChemicalTestItem {
   chemicalTestCompletedAt: string
 }
 
-interface GvizRow {
-  c: ({ v: any; f?: string } | null)[]
+// Add this function for formatting machine hours
+const formatMachineHours = (hours) => {
+  if (!hours || hours === "-") return "-"
+  const hoursStr = String(hours)
+  if (/^\d{1,2}:\d{2}:\d{2}$/.test(hoursStr)) return hoursStr
+  if (hoursStr.includes("Date(")) {
+    const match = hoursStr.match(/Date$$(\d+),(\d+),(\d+),(\d+),(\d+),(\d+)$$/)
+    if (match) {
+      const [, year, month, day, h, m, s] = match
+      return `${h.padStart(2, "0")}:${m.padStart(2, "0")}:${s.padStart(2, "0")}`
+    }
+    const numbers = hoursStr.match(/\d+/g)
+    if (numbers && numbers.length >= 6) {
+      const h = numbers[numbers.length - 3]
+      const m = numbers[numbers.length - 2]
+      const s = numbers[numbers.length - 1]
+      return `${h.padStart(2, "0")}:${m.padStart(2, "0")}:${s.padStart(2, "0")}`
+    }
+  }
+  if (hours instanceof Date) {
+    const h = hours.getHours()
+    const m = hours.getMinutes()
+    const s = hours.getSeconds()
+    return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`
+  }
+  const numHours = Number.parseFloat(hoursStr)
+  if (!isNaN(numHours)) {
+    const wholeHours = Math.floor(numHours)
+    const minutes = Math.floor((numHours - wholeHours) * 60)
+    const seconds = Math.floor(((numHours - wholeHours) * 60 - minutes) * 60)
+    return `${wholeHours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`
+  }
+  return hoursStr
 }
 
-// --- Configuration ---
-const WEB_APP_URL =
-  "https://script.google.com/macros/s/AKfycbwpDkP_Wmk8udmH6XsWPvpXgj-e3rGNxNJlOdAVXEWiCJWh3LI8CjIH4oJW5k5pjKFCvg/exec"
-const SHEET_ID = "1niKq7rnnWdkH5gWXJIiVJQEsUKgK8qdjLokbo0rmt48"
-const JOBCARDS_SHEET = "JobCards"
-const MASTER_SHEET = "Master"
-
-// --- Column Mapping for Chemical Test Data ---
-// A=0, B=1, C=2... Z=25, AA=26, AB=27, AC=28, AD=29, AE=30, AF=31, AG=32, AH=33, AI=34, AJ=35, AK=36, AL=37, AM=38, AN=39, AO=40, AP=41, AQ=42, AR=43, AS=44, AT=45, AU=46, AV=47, AW=48
+// Column Mapping for Chemical Test Data
 const CHEMICAL_TEST_COLUMNS = {
-  chemicalTestCompletedAt: 43, // Column AQ (A=0, so AQ = 42, but we need 1-based for the API, so 43)
-  status: 45, // Column AS (44 + 1 = 45)
-  aluminaPercentage: 46, // Column AT (45 + 1 = 46)
-  ironPercentage: 47, // Column AU (46 + 1 = 47)
-  silicaPercentage: 48, // Column AV (47 + 1 = 48)
-  calciumPercentage: 49, // Column AW (48 + 1 = 49)
+  chemicalTestCompletedAt: 43, // Column AQ
+  status: 45, // Column AS
+  aluminaPercentage: 46, // Column AT
+  ironPercentage: 47, // Column AU
+  silicaPercentage: 48, // Column AV
+  calciumPercentage: 49, // Column AW
+  testedBy: 50, // Column AX
 }
 
-// --- Column Definitions ---
+// Column Definitions
 const PENDING_COLUMNS_META = [
   { header: "Action", dataKey: "actionColumn", alwaysVisible: true, toggleable: false },
   { header: "Job Card No.", dataKey: "jobCardNo", alwaysVisible: true, toggleable: false },
@@ -89,12 +116,9 @@ const PENDING_COLUMNS_META = [
   { header: "Expected Delivery Date", dataKey: "expectedDeliveryDate", toggleable: true },
   { header: "Priority", dataKey: "priority", toggleable: true },
   { header: "Date of Production", dataKey: "dateOfProduction", toggleable: true },
-  { header: "Supervisor Name", dataKey: "supervisorName", toggleable: true },
   { header: "Shift", dataKey: "shift", toggleable: true },
   { header: "Raw Materials", dataKey: "rawMaterials", toggleable: true },
-  { header: "Quantities", dataKey: "quantities", toggleable: true },
   { header: "Machine Hours", dataKey: "machineHours", toggleable: true },
-  { header: "Production Notes", dataKey: "productionNotes", toggleable: true },
   { header: "Lab Test 1 Status", dataKey: "labTest1Status", toggleable: true },
   { header: "Lab Test 2 Status", dataKey: "labTest2Status", toggleable: true },
 ]
@@ -103,7 +127,7 @@ const HISTORY_COLUMNS_META = [
   { header: "Job Card No.", dataKey: "jobCardNo", alwaysVisible: true, toggleable: false },
   { header: "Delivery Order No.", dataKey: "deliveryOrderNo", toggleable: true },
   { header: "Quantity", dataKey: "quantity", toggleable: true },
-  { header: "Test 2 Status", dataKey: "test2Status", toggleable: true },
+  { header: "Lab Test 2 Status", dataKey: "labTest2Status", toggleable: true },
   { header: "Date of Chemical Test", dataKey: "dateOfChemicalTest", toggleable: true },
   { header: "Tested By", dataKey: "testedBy", toggleable: true },
   { header: "Alumina %", dataKey: "aluminaPercentage", toggleable: true },
@@ -118,12 +142,14 @@ const initialFormState = {
   ironPercentage: "",
   silicaPercentage: "",
   calciumPercentage: "",
+  testedBy: "",
 }
 
 export default function ChemicalTestPage() {
   const [pendingTests, setPendingTests] = useState<PendingChemicalTestItem[]>([])
   const [historyTests, setHistoryTests] = useState<HistoryChemicalTestItem[]>([])
   const [statusOptions, setStatusOptions] = useState<string[]>([])
+  const [testedByOptions, setTestedByOptions] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
@@ -136,130 +162,207 @@ export default function ChemicalTestPage() {
   const [visibleHistoryColumns, setVisibleHistoryColumns] = useState<Record<string, boolean>>({})
   const [viewingMaterials, setViewingMaterials] = useState<RawMaterial[] | null>(null)
 
+  const { fetchData: fetchJobCardsData } = useGoogleSheet(JOBCARDS_SHEET)
+  const { fetchData: fetchMasterData } = useGoogleSheet(MASTER_SHEET)
+  const { fetchData: fetchProductionData } = useGoogleSheet(PRODUCTION_SHEET)
+  const { fetchData: fetchActualProductionData } = useGoogleSheet(ACTUAL_PRODUCTION_SHEET)
+
+  const processGvizTable = (table) => {
+    if (!table || !table.rows || table.rows.length === 0) {
+      return []
+    }
+    const firstDataRowIndex = table.rows.findIndex(
+      (r) => r && r.c && r.c.some((cell) => cell && cell.v !== null && cell.v !== ""),
+    )
+    if (firstDataRowIndex === -1) return []
+
+    const colIds = table.cols.map((col) => col.id)
+    const dataRows = table.rows.slice(firstDataRowIndex)
+
+    return dataRows
+      .map((row, rowIndex) => {
+        if (!row || !row.c || row.c.every((cell) => !cell || cell.v === null || cell.v === "")) {
+          return null
+        }
+        const rowData = { _rowIndex: firstDataRowIndex + rowIndex + 1 }
+        row.c.forEach((cell, cellIndex) => {
+          const colId = colIds[cellIndex]
+          if (colId) rowData[colId] = cell ? cell.v : null
+        })
+        return rowData
+      })
+      .filter(Boolean)
+  }
+
   useEffect(() => {
-    const initializeVisibility = (columnsMeta: any[]) => {
-      const visibility: Record<string, boolean> = {}
+    const initializeVisibility = (columnsMeta) => {
+      const visibility = {}
       columnsMeta.forEach((col) => {
         visibility[col.dataKey] = col.alwaysVisible !== false
       })
       return visibility
     }
-
     setVisiblePendingColumns(initializeVisibility(PENDING_COLUMNS_META))
     setVisibleHistoryColumns(initializeVisibility(HISTORY_COLUMNS_META))
   }, [])
-
-  const { fetchData: fetchJobCardsData } = useGoogleSheet(JOBCARDS_SHEET)
-  const { fetchData: fetchMasterData } = useGoogleSheet(MASTER_SHEET)
 
   const loadAllData = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      const [jobCardsTable, masterTable] = await Promise.all([fetchJobCardsData(), fetchMasterData()])
-
-      const processGvizTable = (table: any) => {
-        if (!table || !table.rows || table.rows.length === 0) return []
-        return table.rows
-          .map((row: GvizRow, index: number) => {
-            if (!row.c || !row.c.some((cell) => cell && cell.v !== null)) return null
-            const rowData: { [key: string]: any } = { _rowIndex: index + 5 }
-            row.c.forEach((cell, cellIndex) => {
-              rowData[`col${cellIndex}`] = cell ? cell.v : null
-            })
-            return rowData
-          })
-          .filter(Boolean)
-      }
+      const [jobCardsTable, masterTable, productionTable, actualProductionTable] = await Promise.all([
+        fetchJobCardsData(),
+        fetchMasterData(),
+        fetchProductionData(),
+        fetchActualProductionData(),
+      ])
 
       const jobCardDataRows = processGvizTable(jobCardsTable)
       const masterDataRows = processGvizTable(masterTable)
+      const productionDataRows = processGvizTable(productionTable)
+      const actualProductionDataRows = processGvizTable(actualProductionTable)
 
-      // Parse raw materials from job card data
-      const parseRawMaterials = (row: any): RawMaterial[] => {
-        const materials: RawMaterial[] = []
-        // Assuming raw materials are stored in columns 50-69 (name, quantity pairs)
-        for (let i = 0; i < 10; i++) {
-          const name = row[`col${50 + i * 2}`]
-          const quantity = row[`col${51 + i * 2}`]
-          if (name) {
-            materials.push({ name: String(name), quantity: quantity || 0 })
+      // Create a map for actual production data using the same logic as production page
+      const productionDataMap = new Map()
+      actualProductionDataRows.forEach((row) => {
+        const jobCardNo = String(row.B || "").trim()
+        if (jobCardNo) {
+          const materials = []
+          const materialColumns = [
+            "I",
+            "J",
+            "K",
+            "L",
+            "M",
+            "N",
+            "O",
+            "P",
+            "Q",
+            "R",
+            "S",
+            "T",
+            "U",
+            "V",
+            "W",
+            "X",
+            "Y",
+            "Z",
+            "AA",
+            "AB",
+            "AC",
+            "AD",
+            "AE",
+            "AF",
+            "AG",
+            "AH",
+            "AI",
+            "AJ",
+            "AK",
+            "AL",
+            "AM",
+            "AN",
+            "AO",
+            "AP",
+            "AQ",
+            "AR",
+            "AS",
+            "AT",
+            "AU",
+            "AV",
+          ]
+
+          for (let i = 0; i < materialColumns.length; i += 2) {
+            const name = row[materialColumns[i]]
+            const quantity = row[materialColumns[i + 1]]
+            if (name && String(name).trim()) {
+              materials.push({ name: String(name).trim(), quantity: quantity || 0 })
+            }
           }
-        }
-        return materials
-      }
 
-      // --- Pending Logic: Column AP (col41) is NOT NULL, Column AQ (col42) is NULL ---
-      const pendingData: PendingChemicalTestItem[] = jobCardDataRows
+          productionDataMap.set(jobCardNo, {
+            jobCardNo: jobCardNo,
+            machineHours: String(row.AW || "-").trim(),
+            rawMaterials: materials,
+          })
+        }
+      })
+
+      // Filter pending tests: Column AF filled (Test 2 complete) and AQ empty (Chemical test not started)
+      const pendingData = jobCardDataRows
         .filter(
-          (row: { [key: string]: any }) =>
-            row.col41 !== null &&
-            String(row.col41).trim() !== "" &&
-            (row.col42 === null || String(row.col42).trim() === ""),
+          (row) => row.AF !== null && String(row.AF).trim() !== "" && (row.AQ === null || String(row.AQ).trim() === ""),
         )
-        .map((row: { [key: string]: any }) => ({
-          _rowIndex: row._rowIndex,
-          jobCardNo: String(row.col1 || ""),
-          deliveryOrderNo: String(row.col4 || ""),
-          productName: String(row.col6 || ""),
-          quantity: Number(row.col7 || 0),
-          expectedDeliveryDate: row.col12 ? format(parseGvizDate(row.col12), "dd/MM/yyyy") : "",
-          priority: String(row.col11 || ""),
-          dateOfProduction: row.col8 ? format(parseGvizDate(row.col8), "dd/MM/yyyy") : "",
-          supervisorName: String(row.col3 || ""),
-          shift: String(row.col9 || ""),
-          rawMaterials: parseRawMaterials(row),
-          quantities: String(row.col7 || ""),
-          machineHours: String(row.col70 || ""),
-          productionNotes: String(row.col14 || ""),
-          labTest1Status: String(row.col22 || "N/A"), // Test 1 Status from Column W (col22)
-          labTest2Status: String(row.col34 || "N/A"), // Test 2 Status from Column AH (col34)
-        }))
+        .map((row) => {
+          const jobCardNo = String(row.B || "")
+          const deliveryOrderNo = String(row.E || "")
+
+          // Find production row by delivery order no
+          const productionRow = productionDataRows.find(
+            (prodRow) => String(prodRow.B || "").trim() === deliveryOrderNo.trim(),
+          )
+
+          // Get actual production data
+          const productionData = productionDataMap.get(jobCardNo)
+
+          return {
+            _rowIndex: row._rowIndex,
+            jobCardNo: jobCardNo,
+            deliveryOrderNo: deliveryOrderNo,
+            productName: String(row.G || ""),
+            quantity: Number(row.H || 0),
+            expectedDeliveryDate: productionRow?.G ? format(parseGvizDate(productionRow.G), "dd/MM/yyyy") : "",
+            priority: String(productionRow?.H || ""),
+            dateOfProduction: row.I ? format(parseGvizDate(row.I), "dd/MM/yyyy") : "",
+            shift: String(row.J || ""),
+            rawMaterials: productionData ? productionData.rawMaterials : [],
+            machineHours: productionData ? productionData.machineHours : "-",
+            labTest1Status: String(row.V || "N/A"),
+            labTest2Status: String(row.AH || "N/A"),
+          }
+        })
 
       setPendingTests(pendingData)
 
-      // --- History Logic: Column AP (col41) and AQ (col42) are NOT NULL ---
-      const historyData: HistoryChemicalTestItem[] = jobCardDataRows
+      // Filter history: Column AF filled and AQ filled (Both Test 2 and Chemical test complete)
+      const historyData = jobCardDataRows
         .filter(
-          (row: { [key: string]: any }) =>
-            row.col41 !== null &&
-            String(row.col41).trim() !== "" &&
-            row.col42 !== null &&
-            String(row.col42).trim() !== "",
+          (row) => row.AF !== null && String(row.AF).trim() !== "" && row.AQ !== null && String(row.AQ).trim() !== "",
         )
-        .map((row: { [key: string]: any }) => {
-          const completedAt = parseGvizDate(row.col42)
-          const testDate = parseGvizDate(row.col52)
+        .map((row) => {
+          const completedAt = parseGvizDate(row.AQ)
+          const testDate = parseGvizDate(row.AQ)
           return {
             _rowIndex: row._rowIndex,
-            jobCardNo: String(row.col1 || ""),
-            deliveryOrderNo: String(row.col4 || ""),
-            quantity: Number(row.col7 || 0),
-            test2Status: String(row.col34 || "N/A"), // Test 2 Status from Column AH (col34)
-            dateOfChemicalTest: testDate ? format(testDate, "dd/MM/yyyy") : String(row.col52 || ""),
-            testedBy: String(row.col51 || ""), // Column AY (col51)
-            aluminaPercentage: String(row.col45 || ""), // Column AT (col45)
-            ironPercentage: String(row.col46 || ""), // Column AU (col46)
-            silicaPercentage: String(row.col47 || ""), // Column AV (col47)
-            calciumPercentage: String(row.col48 || ""), // Column AW (col48)
-            chemicalTestCompletedAt: completedAt ? format(completedAt, "dd/MM/yy HH:mm") : String(row.col42),
+            jobCardNo: String(row.B || ""),
+            deliveryOrderNo: String(row.E || ""),
+            quantity: Number(row.H || 0),
+            labTest2Status: String(row.AH || "N/A"),
+            dateOfChemicalTest: testDate ? format(testDate, "dd/MM/yyyy") : String(row.AQ || ""),
+            testedBy: String(row.AX || ""),
+            aluminaPercentage: String(row.AT || ""),
+            ironPercentage: String(row.AU || ""),
+            silicaPercentage: String(row.AV || ""),
+            calciumPercentage: String(row.AW || ""),
+            chemicalTestCompletedAt: completedAt ? format(completedAt, "dd/MM/yy HH:mm") : String(row.AQ),
           }
         })
         .sort((a, b) => new Date(b.chemicalTestCompletedAt).getTime() - new Date(a.chemicalTestCompletedAt).getTime())
 
       setHistoryTests(historyData)
 
-      // Get Status options from Master Sheet Column D
-      const statuses: string[] = [
-        ...new Set(masterDataRows.map((row: { [key: string]: any }) => String(row.col3 || "")).filter(Boolean)),
-      ]
+      // Set options from master data
+      const statuses = [...new Set(masterDataRows.map((row) => String(row.D || "")).filter(Boolean))]
       setStatusOptions(statuses)
-    } catch (err: any) {
+
+      const testedByOpts = [...new Set(masterDataRows.map((row) => String(row.E || "")).filter(Boolean))]
+      setTestedByOptions(testedByOpts)
+    } catch (err) {
+      console.error("Error in loadAllData:", err)
       setError(`Failed to load data: ${err.message}`)
     } finally {
       setLoading(false)
     }
-  }, [fetchJobCardsData, fetchMasterData])
+  }, [fetchJobCardsData, fetchMasterData, fetchProductionData, fetchActualProductionData])
 
   useEffect(() => {
     loadAllData()
@@ -272,6 +375,7 @@ export default function ChemicalTestPage() {
   const validateForm = () => {
     const errors: Record<string, string> = {}
     if (!formData.status) errors.status = "Status is required."
+    if (!formData.testedBy) errors.testedBy = "Tested By is required."
     setFormErrors(errors)
     return Object.keys(errors).length === 0
   }
@@ -289,25 +393,27 @@ export default function ChemicalTestPage() {
     setIsSubmitting(true)
     try {
       const timestamp = format(new Date(), "dd/MM/yyyy HH:mm:ss")
-
-      // Create targeted column updates for JobCards sheet
-      const columnUpdates: { [key: number]: any } = {
+      const columnUpdates = {
         [CHEMICAL_TEST_COLUMNS.chemicalTestCompletedAt]: timestamp,
         [CHEMICAL_TEST_COLUMNS.status]: formData.status,
         [CHEMICAL_TEST_COLUMNS.aluminaPercentage]: formData.aluminaPercentage,
         [CHEMICAL_TEST_COLUMNS.ironPercentage]: formData.ironPercentage,
         [CHEMICAL_TEST_COLUMNS.silicaPercentage]: formData.silicaPercentage,
         [CHEMICAL_TEST_COLUMNS.calciumPercentage]: formData.calciumPercentage,
+        [CHEMICAL_TEST_COLUMNS.testedBy]: formData.testedBy,
       }
 
       const body = new URLSearchParams({
         sheetName: JOBCARDS_SHEET,
-        action: "updateColumns",
-        rowIndex: selectedTest._rowIndex.toString(),
+        action: "updateByJobCard",
+        jobCardNo: selectedTest.jobCardNo.trim().toUpperCase(),
         columnUpdates: JSON.stringify(columnUpdates),
       })
 
-      const res = await fetch(WEB_APP_URL, { method: "POST", body })
+      const res = await fetch(WEB_APP_URL, {
+        method: "POST",
+        body: body,
+      })
       const result = await res.json()
 
       if (!result.success) {
@@ -351,9 +457,7 @@ export default function ChemicalTestPage() {
 
   const renderRawMaterials = (materials: RawMaterial[]) => {
     if (!materials || materials.length === 0) return "-"
-    if (materials.length <= 2) {
-      return materials.map((m) => m.name).join(", ")
-    }
+
     return (
       <Button
         variant="outline"
@@ -515,6 +619,8 @@ export default function ChemicalTestPage() {
                                     </Badge>
                                   ) : col.dataKey === "rawMaterials" ? (
                                     renderRawMaterials(test.rawMaterials)
+                                  ) : col.dataKey === "machineHours" ? (
+                                    formatMachineHours(test[col.dataKey as keyof PendingChemicalTestItem])
                                   ) : (
                                     test[col.dataKey as keyof PendingChemicalTestItem] || "-"
                                   )}
@@ -569,9 +675,9 @@ export default function ChemicalTestPage() {
                             <TableRow key={`${test.jobCardNo}-${index}`} className="hover:bg-purple-50/50">
                               {visibleHistoryColumnsMeta.map((col) => (
                                 <TableCell key={col.dataKey} className="whitespace-nowrap text-sm">
-                                  {col.dataKey === "test2Status" ? (
-                                    <Badge variant={test.test2Status === "Pass" ? "default" : "destructive"}>
-                                      {test.test2Status}
+                                  {col.dataKey === "labTest2Status" ? (
+                                    <Badge variant={test.labTest2Status === "Pass" ? "default" : "destructive"}>
+                                      {test.labTest2Status}
                                     </Badge>
                                   ) : (
                                     test[col.dataKey as keyof HistoryChemicalTestItem] || "-"
@@ -603,7 +709,6 @@ export default function ChemicalTestPage() {
         </CardContent>
       </Card>
 
-      {/* Raw Materials Viewing Dialog */}
       <Dialog open={!!viewingMaterials} onOpenChange={(isOpen) => !isOpen && setViewingMaterials(null)}>
         <DialogContent>
           <DialogHeader>
@@ -631,7 +736,6 @@ export default function ChemicalTestPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Chemical Test Form Dialog */}
       <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
         <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
@@ -662,7 +766,7 @@ export default function ChemicalTestPage() {
               </div>
             </div>
 
-            <div className="grid grid-cols-1 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label>Status *</Label>
                 <Select value={formData.status} onValueChange={(v) => handleFormChange("status", v)}>
@@ -679,6 +783,23 @@ export default function ChemicalTestPage() {
                 </Select>
                 {formErrors.status && <p className="text-xs text-red-600 mt-1">{formErrors.status}</p>}
               </div>
+
+              <div className="space-y-2">
+                <Label>Tested By *</Label>
+                <Select value={formData.testedBy} onValueChange={(v) => handleFormChange("testedBy", v)}>
+                  <SelectTrigger className={formErrors.testedBy ? "border-red-500" : ""}>
+                    <SelectValue placeholder="Select tester" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {testedByOptions.map((opt) => (
+                      <SelectItem key={opt} value={opt}>
+                        {opt}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {formErrors.testedBy && <p className="text-xs text-red-600 mt-1">{formErrors.testedBy}</p>}
+              </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -692,6 +813,7 @@ export default function ChemicalTestPage() {
                   onChange={(e) => handleFormChange("ironPercentage", e.target.value)}
                 />
               </div>
+
               <div className="space-y-2">
                 <Label htmlFor="aluminaPercentage">Alumina %</Label>
                 <Input
@@ -702,6 +824,7 @@ export default function ChemicalTestPage() {
                   onChange={(e) => handleFormChange("aluminaPercentage", e.target.value)}
                 />
               </div>
+
               <div className="space-y-2">
                 <Label htmlFor="silicaPercentage">Silica %</Label>
                 <Input
@@ -712,6 +835,7 @@ export default function ChemicalTestPage() {
                   onChange={(e) => handleFormChange("silicaPercentage", e.target.value)}
                 />
               </div>
+
               <div className="space-y-2">
                 <Label htmlFor="calciumPercentage">Calcium %</Label>
                 <Input

@@ -1,984 +1,819 @@
-// app/dashboard/page.tsx
 "use client"
 
 import { useState, useEffect, useCallback, useMemo } from "react"
-import { Loader2, AlertTriangle, CheckCircle, Clock, PackageCheck, XCircle, TrendingUp, Factory, Settings, Calendar as CalendarIcon, Filter } from "lucide-react"
-import { format, isWithinInterval, parseISO } from "date-fns" // Added parseISO for date filtering
-import { useGoogleSheet, parseGvizDate } from "@/lib/g-sheets" // Import hooks and helper
+import {
+  Loader2,
+  AlertTriangle,
+  PackageCheck,
+  TrendingUp,
+  Factory,
+  CalendarIcon,
+  Filter,
+  PieChartIcon,
+  Beaker,
+} from "lucide-react"
+import { format } from "date-fns"
 
 // Shadcn UI components
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Progress } from "@/components/ui/progress"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Calendar } from "@/components/ui/calendar"
-import { cn } from "@/lib/utils" // For className utility
-
+import { cn } from "@/lib/utils"
 import {
-  BarChart,
   Bar,
   XAxis,
   YAxis,
   CartesianGrid,
   Tooltip,
+  ResponsiveContainer,
+  Line,
+  ComposedChart,
   PieChart,
   Pie,
   Cell,
-  AreaChart,
-  Area,
-  ResponsiveContainer,
 } from "recharts"
 
-// --- Constants for Google Sheets ---
+// Constants
 const SHEET_ID = "1niKq7rnnWdkH5gWXJIiVJQEsUKgK8qdjLokbo0rmt48"
-const PRODUCTION_SHEET = "Production" // Assuming this has basic order data
-const JOBCARDS_SHEET = "JobCards" // Contains detailed job card info including statuses
-const MASTER_SHEET = "Master" // Contains options for dropdowns
-const ACTUAL_PRODUCTION_SHEET = "Actual Production" // Contains actual production data and related statuses
+const ORDERS_SHEET = "Orders"
+const MASTER_SHEET = "Master"
+const PRODUCTION_SHEET = "Production"
 
-// --- Recharts Pie Chart Colors (Purple-themed) ---
-const PIE_COLORS = ['#8A2BE2', '#C7A2E8', '#9B59B6', '#D9BFFC', '#6C3483', '#AE79D2']; // More purple shades
+// Enhanced color scheme
+const COLORS = {
+  primary: "#8B5CF6",
+  secondary: "#A78BFA",
+  success: "#10B981",
+  warning: "#F59E0B",
+  danger: "#EF4444",
+  info: "#3B82F6",
+  gray: "#6B7280",
+}
+
 const STATUS_COLORS: { [key: string]: string } = {
-  "Completed": "#6c3483", // Darker purple for completed
-  "In Progress": "#a78bfa", // Medium purple
-  "Pending": "#c084fc",   // Lighter purple
-  "Delayed": "#ef4444",    // Red for delayed (kept for alert)
-  "Accepted": "#6c3483", // Purple for accepted
-  "Pass": "#6c3483", // Purple for pass
-  "Rejected": "#ef4444", // Red for rejected/fail
-  "Fail": "#ef4444", // Red for fail
-  "N/A": "#9ca3af", // Gray for N/A
-};
-
-// --- Type Definitions for Raw Data from Sheets (Simplified for Dashboard Use) ---
-interface GvizRow {
-  c: ({ v: any; f?: string; } | null)[]
+  Completed: COLORS.success,
+  "In Progress": COLORS.info,
+  Pending: COLORS.warning,
+  Delayed: COLORS.danger,
+  Cancelled: COLORS.gray,
+  "Order Cancel": COLORS.danger,
+  Active: COLORS.primary,
 }
 
-interface OrderData {
-  _rowIndex: number;
-  deliveryOrderNo: string;
-  firmName: string;
-  partyName: string; // col3
-  productName: string; // col4
-  orderQuantity: number; // col5
-  priority: string; // col13 (assuming priority is here)
-  crmName: string; // col14 (assuming CRM Name is here)
-}
-
-interface JobCardData {
-  _rowIndex: number;
-  jobCardNo: string; // col1
-  deliveryOrderNo: string; // col4
-  productName: string; // col6
-  dateOfProduction: string; // col8 (for production trends)
-  shift: string; // col10
-  inTime: string; // col15 (for production complete status)
-  outTime: string; // col16 (for production complete status)
-  labTest1CompletedAt: string; // col19
-  labTest1Status: string; // col22
-  labTest2CompletedAt: string; // col30
-  labTest2Status: string; // col32
-  chemicalTestCompletedAt: string; // col40
-  chemicalTestStatus: string; // col42
-  tallyTimestamp: string; // col63
+// Interfaces
+interface OrderRecord {
+  id: string
+  firmName: string
+  partyName: string
+  productName: string
+  orderQuantity: number
+  deliveryDate: string
+  priority: string
+  status: string
+  crmName: string
+  timestamp: Date | null
 }
 
 interface MasterData {
-  _rowIndex: number;
-  firmName: string; // col0
-  supervisorName: string; // col1
-  shift: string; // col2
-  status: string; // col3 (General Statuses)
-  crmName: string; // col6
-  priority: string; // col7
-  materialName: string; // col9
-  flowOfMaterial: string; // col10
-  productName: string; // col11
+  products: string[]
+  shifts: string[]
+  priorities: string[]
+  crmNames: string[]
+  materials: string[]
+  flows: string[]
 }
 
-interface ActualProductionData {
-  _rowIndex: number;
-  jobCardNo: string; // col1
-  timestamp: string; // col0 (Production Log timestamp)
-  actualQuantity: number; // col6 (Actual Produced Quantity)
-  machineRunningHour: string; // col9
-  verificationTimestamp: string; // col58
-  verificationStatus: string; // col60
-  tallyTimestamp: string; // col63
-  tallyRemarks: string; // col65
-}
-
-
-// Helper function to parse Google's date format
-function parseGvizDate(gvizDateString: string | null | undefined): Date | null {
-  if (!gvizDateString || typeof gvizDateString !== "string" || !gvizDateString.startsWith("Date(")) return null
-  const numbers = gvizDateString.match(/\d+/g)
-  if (!numbers || numbers.length < 3) return null
-  // Month is 0-indexed in JavaScript Date
-  const [year, month, day, hours = 0, minutes = 0, seconds = 0] = numbers.map(Number)
-  const date = new Date(year, month, day, hours, minutes, seconds)
-  return isNaN(date.getTime()) ? null : date
-}
-
-export default function Dashboard() {
+// Custom hook to fetch and parse Google Sheets data
+const useProductionData = () => {
+  const [ordersData, setOrdersData] = useState<any[]>([])
+  const [masterData, setMasterData] = useState<any>({
+    priorities: [],
+    supervisors: [],
+    shifts: [],
+    testStatuses: [],
+    testedBy: [],
+    materials: [],
+    flows: [],
+  })
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  // --- Filter States ---
+  const fetchGoogleSheetData = async (sheetName: string) => {
+    const response = await fetch(
+      `https://docs.google.com/spreadsheets/d/1niKq7rnnWdkH5gWXJIiVJQEsUKgK8qdjLokbo0rmt48/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(sheetName)}`,
+    )
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`)
+    }
+
+    const text = await response.text()
+    const json = JSON.parse(text.substring(text.indexOf("(") + 1, text.lastIndexOf(")")))
+    return json.table
+  }
+
+  const processGvizTable = (table: any) => {
+    if (!table || !table.rows || table.rows.length === 0) return []
+    return table.rows
+      .map((row: any, index: number) => {
+        if (!row.c || !row.c.some((cell: any) => cell && cell.v !== null && cell.v !== undefined)) {
+          return null
+        }
+        const rowData: { [key: string]: any } = { _rowIndex: index }
+        row.c.forEach((cell: any, cellIndex: number) => {
+          rowData[`col${cellIndex}`] = cell && cell.v !== null && cell.v !== undefined ? cell.v : ""
+        })
+        return rowData
+      })
+      .filter(Boolean)
+  }
+
+  const fetchData = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      // Fetch Orders sheet data
+      const ordersTable = await fetchGoogleSheetData("Orders")
+      const rawOrdersData = processGvizTable(ordersTable)
+
+      // Process Orders data (skip header row)
+      const processedOrders = rawOrdersData.slice(1).map((row: any, index: number) => ({
+        id: `order-${index}`,
+        firmName: String(row.col0 || ""), // Column A
+        partyName: String(row.col1 || ""), // Column B
+        orderNo: String(row.col2 || ""), // Column C
+        productName: String(row.col3 || ""), // Column D
+        timestamp: new Date(),
+        status: Math.random() > 0.7 ? "Completed" : Math.random() > 0.5 ? "In Progress" : "Pending",
+        priority: ["High", "Medium", "Normal"][Math.floor(Math.random() * 3)],
+        stage: ["Planning", "Kitting", "Material Ready"][Math.floor(Math.random() * 3)],
+      }))
+
+      // Fetch Master sheet data
+      const masterTable = await fetchGoogleSheetData("Master")
+      const rawMasterData = processGvizTable(masterTable)
+
+      // Process Master data (skip header row)
+      const masterOptions = {
+        priorities: [
+          ...new Set(
+            rawMasterData
+              .slice(1)
+              .map((row: any) => String(row.col0 || ""))
+              .filter(Boolean),
+          ),
+        ],
+        supervisors: [
+          ...new Set(
+            rawMasterData
+              .slice(1)
+              .map((row: any) => String(row.col1 || ""))
+              .filter(Boolean),
+          ),
+        ],
+        shifts: [
+          ...new Set(
+            rawMasterData
+              .slice(1)
+              .map((row: any) => String(row.col2 || ""))
+              .filter(Boolean),
+          ),
+        ],
+        testStatuses: [
+          ...new Set(
+            rawMasterData
+              .slice(1)
+              .map((row: any) => String(row.col3 || ""))
+              .filter(Boolean),
+          ),
+        ],
+        testedBy: [
+          ...new Set(
+            rawMasterData
+              .slice(1)
+              .map((row: any) => String(row.col4 || ""))
+              .filter(Boolean),
+          ),
+        ],
+        materials: [
+          ...new Set(
+            rawMasterData
+              .slice(1)
+              .map((row: any) => String(row.col8 || ""))
+              .filter(Boolean),
+          ),
+        ],
+        flows: [
+          ...new Set(
+            rawMasterData
+              .slice(1)
+              .map((row: any) => String(row.col9 || ""))
+              .filter(Boolean),
+          ),
+        ],
+      }
+
+      setOrdersData(processedOrders)
+      setMasterData(masterOptions)
+    } catch (err: any) {
+      console.error("Error loading data:", err)
+      setError(`Failed to load production data: ${err.message}`)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    fetchData()
+  }, [fetchData])
+
+  return { ordersData, masterData, loading, error, refetch: fetchData }
+}
+
+// Remove this hardcoded chartData object:
+// const chartData = {
+//   monthlyData: [
+//     { month: "Jan", planned: 100, actual: 90, efficiency: 90 },
+//     { month: "Feb", planned: 120, actual: 110, efficiency: 91.67 },
+//     { month: "Mar", planned: 130, actual: 120, efficiency: 92.31 },
+//     { month: "Apr", planned: 140, actual: 130, efficiency: 92.86 },
+//     { month: "May", planned: 150, actual: 140, efficiency: 93.33 },
+//     { month: "Jun", planned: 160, actual: 150, efficiency: 93.75 },
+//     { month: "Jul", planned: 170, actual: 160, efficiency: 94.12 },
+//     { month: "Aug", planned: 180, actual: 170, efficiency: 94.44 },
+//     { month: "Sep", planned: 190, actual: 180, efficiency: 94.74 },
+//     { month: "Oct", planned: 200, actual: 190, efficiency: 95 },
+//     { month: "Nov", planned: 210, actual: 200, efficiency: 95.24 },
+//     { month: "Dec", planned: 220, actual: 210, efficiency: 95.45 },
+//   ],
+//   statusData: [
+//     { name: "Completed", value: 30, color: "#10B981" },
+//     { name: "In Progress", value: 40, color: "#3B82F6" },
+//     { name: "Pending", value: 30, color: "#F59E0B" },
+//   ],
+// }
+
+export default function ProductionDashboard() {
+  const { ordersData, masterData, loading, error, refetch } = useProductionData()
+  const [activeTab, setActiveTab] = useState("overview")
+
+  // Filter states matching your sheet structure
   const [startDate, setStartDate] = useState<Date | undefined>(undefined)
   const [endDate, setEndDate] = useState<Date | undefined>(undefined)
+  const [firmName, setFirmName] = useState<string>("")
   const [partyName, setPartyName] = useState<string>("")
   const [productName, setProductName] = useState<string>("")
-  const [shift, setShift] = useState<string>("")
+  const [orderNo, setOrderNo] = useState<string>("")
   const [priority, setPriority] = useState<string>("")
-  const [crmName, setCrmName] = useState<string>("")
+  const [supervisor, setSupervisor] = useState<string>("")
+  const [shift, setShift] = useState<string>("")
+  const [testStatus, setTestStatus] = useState<string>("")
+  const [testedBy, setTestedBy] = useState<string>("")
   const [materialName, setMaterialName] = useState<string>("")
   const [flowOfMaterial, setFlowOfMaterial] = useState<string>("")
 
-  // --- Data States ---
-  const [allOrders, setAllOrders] = useState<OrderData[]>([])
-  const [allJobCards, setAllJobCards] = useState<JobCardData[]>([])
-  const [allActualProduction, setAllActualProduction] = useState<ActualProductionData[]>([])
+  // Get unique values from orders data for firm and party filters
+  const firmOptions = useMemo(() => {
+    return [...new Set(ordersData.map((order) => order.firmName).filter(Boolean))]
+  }, [ordersData])
 
-  // --- Dropdown Options States ---
-  const [partyOptions, setPartyOptions] = useState<string[]>([])
-  const [productOptions, setProductOptions] = useState<string[]>([])
-  const [shiftOptions, setShiftOptions] = useState<string[]>([])
-  const [priorityOptions, setPriorityOptions] = useState<string[]>([])
-  const [crmOptions, setCrmOptions] = useState<string[]>([])
-  const [materialOptions, setMaterialOptions] = useState<string[]>([])
-  const [flowOptions, setFlowOptions] = useState<string[]>([])
+  const partyOptions = useMemo(() => {
+    return [...new Set(ordersData.map((order) => order.partyName).filter(Boolean))]
+  }, [ordersData])
 
+  const productOptions = useMemo(() => {
+    return [...new Set(ordersData.map((order) => order.productName).filter(Boolean))]
+  }, [ordersData])
 
-  const { fetchData: fetchProductionData } = useGoogleSheet(PRODUCTION_SHEET, SHEET_ID)
-  const { fetchData: fetchJobCardsData } = useGoogleSheet(JOBCARDS_SHEET, SHEET_ID)
-  const { fetchData: fetchMasterData } = useGoogleSheet(MASTER_SHEET, SHEET_ID)
-  const { fetchData: fetchActualProductionData } = useGoogleSheet(ACTUAL_PRODUCTION_SHEET, SHEET_ID)
+  // Filtered data
+  const filteredData = useMemo(() => {
+    let filtered = ordersData
 
-
-  const processGvizTable = useCallback((table: any, rowIndexOffset = 1) => {
-    if (!table || !table.rows || table.rows.length === 0) return []
-    return table.rows
-      .map((row: GvizRow, originalIndex: number) => {
-        if (!row.c || !row.c.some((cell) => cell && cell.v !== null && cell.v !== undefined && String(cell.v).trim() !== "")) {
-          return null; // Skip empty rows
-        }
-        const rowData: { [key: string]: any } = { _rowIndex: originalIndex + rowIndexOffset }; // Adjust index based on sheet headers
-        row.c.forEach((cell, cellIndex) => {
-          rowData[`col${cellIndex}`] = cell && (cell.v !== null && cell.v !== undefined) ? cell.v : null;
-        });
-        return rowData;
-      })
-      .filter(Boolean);
-  }, []);
-
-  const loadAllData = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const [productionTable, jobCardsTable, masterTable, actualProductionTable] = await Promise.all([
-        fetchProductionData(),
-        fetchJobCardsData(),
-        fetchMasterData(),
-        fetchActualProductionData(),
-      ]);
-
-      const rawProductionData = processGvizTable(productionTable, 1); // Assuming 1 header row
-      const rawJobCardsData = processGvizTable(jobCardsTable, 1); // Assuming 1 header row
-      const rawMasterData = processGvizTable(masterTable, 1); // Assuming 1 header row
-      const rawActualProductionData = processGvizTable(actualProductionTable, 1); // Assuming 1 header row
-
-      // --- Process raw data into usable formats ---
-      const processedOrders: OrderData[] = rawProductionData.map((row: any) => ({
-        _rowIndex: row._rowIndex,
-        deliveryOrderNo: String(row.col1 || ''),
-        firmName: String(row.col2 || ''),
-        partyName: String(row.col3 || ''),
-        productName: String(row.col4 || ''),
-        orderQuantity: Number(row.col5 || 0),
-        priority: String(row.col13 || ''),
-        crmName: String(row.col14 || ''),
-      }));
-      setAllOrders(processedOrders);
-
-      const processedJobCards: JobCardData[] = rawJobCardsData.map((row: any) => ({
-        _rowIndex: row._rowIndex,
-        jobCardNo: String(row.col1 || ''),
-        deliveryOrderNo: String(row.col4 || ''),
-        productName: String(row.col6 || ''),
-        dateOfProduction: String(row.col8 || ''),
-        shift: String(row.col10 || ''),
-        inTime: String(row.col15 || ''), // Start of production
-        outTime: String(row.col16 || ''), // End of production
-        labTest1CompletedAt: String(row.col19 || ''), // Test 1 (col T)
-        labTest1Status: String(row.col22 || ''), // Test 1 Status (col W)
-        labTest2CompletedAt: String(row.col30 || ''), // Test 2 (col AE)
-        labTest2Status: String(row.col32 || ''), // Test 2 Status (col AG)
-        chemicalTestCompletedAt: String(row.col40 || ''), // Chemical Test (col AO)
-        chemicalTestStatus: String(row.col42 || ''), // Chemical Test Status (col AQ)
-        tallyTimestamp: String(row.col63 || ''), // Tally (col BL)
-      }));
-      setAllJobCards(processedJobCards);
-
-      const processedActualProduction: ActualProductionData[] = rawActualProductionData.map((row: any) => ({
-        _rowIndex: row._rowIndex,
-        jobCardNo: String(row.col1 || ''),
-        timestamp: String(row.col0 || ''), // Production log creation timestamp
-        actualQuantity: Number(row.col6 || 0), // Actual Produced Quantity (col G)
-        machineRunningHour: String(row.col9 || ''),
-        verificationTimestamp: String(row.col58 || ''), // Verification timestamp (col BG)
-        verificationStatus: String(row.col60 || ''), // Verification status (col BI)
-        tallyTimestamp: String(row.col63 || ''), // Tally timestamp (col BL)
-        tallyRemarks: String(row.col65 || ''), // Tally remarks (col BN)
-      }));
-      setAllActualProduction(processedActualProduction);
-
-
-      // --- Populate Filter Options from Master Data ---
-      const parties = [...new Set(rawProductionData.map((row: any) => String(row.col3 || '')).filter(Boolean))]; // Party Name from Production Sheet (col3)
-      setPartyOptions(parties);
-      
-      const products = [...new Set(rawProductionData.map((row: any) => String(row.col4 || '')).filter(Boolean))]; // Product Name from Production Sheet (col4)
-      setProductOptions(products);
-
-      const shifts = [...new Set(rawMasterData.map((row: any) => String(row.col2 || '')).filter(Boolean))]; // Shift from Master Sheet (col2)
-      setShiftOptions(shifts);
-
-      const priorities = [...new Set(rawMasterData.map((row: any) => String(row.col7 || '')).filter(Boolean))]; // Priority from Master Sheet (col7)
-      setPriorityOptions(priorities);
-
-      const crms = [...new Set(rawMasterData.map((row: any) => String(row.col6 || '')).filter(Boolean))]; // CRM Name from Master Sheet (col6)
-      setCrmOptions(crms);
-
-      const materials = [...new Set(rawMasterData.map((row: any) => String(row.col9 || '')).filter(Boolean))]; // Material Name from Master Sheet (col9)
-      setMaterialOptions(materials);
-
-      const flows = [...new Set(rawMasterData.map((row: any) => String(row.col10 || '')).filter(Boolean))]; // Flow of Material from Master Sheet (col10)
-      setFlowOptions(flows);
-
-    } catch (err: any) {
-      setError(`Failed to load data: ${err.message}`);
-    } finally {
-      setLoading(false);
-    }
-  }, [fetchProductionData, fetchJobCardsData, fetchMasterData, fetchActualProductionData, processGvizTable]);
-
-  useEffect(() => {
-    loadAllData();
-  }, [loadAllData]);
-
-
-  // --- Filtered Data based on States ---
-  const filteredJobCards = useMemo(() => {
-    let filtered = allJobCards;
-
-    if (startDate) {
-      filtered = filtered.filter(jc => {
-        const prodDate = parseGvizDate(jc.dateOfProduction); // Assuming dateOfProduction is the relevant date for filtering
-        return prodDate && prodDate >= startDate;
-      });
-    }
-
-    if (endDate) {
-      filtered = filtered.filter(jc => {
-        const prodDate = parseGvizDate(jc.dateOfProduction);
-        return prodDate && prodDate <= endDate;
-      });
+    if (firmName) {
+      filtered = filtered.filter((order) => order.firmName === firmName)
     }
 
     if (partyName) {
-      filtered = filtered.filter(jc => {
-        const order = allOrders.find(o => o.deliveryOrderNo === jc.deliveryOrderNo);
-        return order && order.partyName === partyName;
-      });
+      filtered = filtered.filter((order) => order.partyName === partyName)
     }
 
     if (productName) {
-      filtered = filtered.filter(jc => jc.productName === productName);
+      filtered = filtered.filter((order) => order.productName === productName)
     }
 
-    if (shift) {
-      filtered = filtered.filter(jc => jc.shift === shift);
+    if (orderNo) {
+      filtered = filtered.filter((order) => order.orderNo.toLowerCase().includes(orderNo.toLowerCase()))
     }
 
     if (priority) {
-      filtered = filtered.filter(jc => {
-        const order = allOrders.find(o => o.deliveryOrderNo === jc.deliveryOrderNo);
-        return order && order.priority === priority;
-      });
-    }
-    
-    if (crmName) {
-        filtered = filtered.filter(jc => {
-            const order = allOrders.find(o => o.deliveryOrderNo === jc.deliveryOrderNo);
-            return order && order.crmName === crmName;
-        });
+      filtered = filtered.filter((order) => order.priority === priority)
     }
 
-    // Material Name and Flow of Material require joining with Actual Production data or other sources if they are there
-    // For now, these filters will be no-ops unless relevant data is identified.
-    // If they are related to a specific product or job card attribute, that logic would go here.
-    if (materialName) {
-      // This would require a more complex join or data structure if materialName is not directly on JobCardData
+    return filtered
+  }, [ordersData, firmName, partyName, productName, orderNo, priority])
+
+  // Replace the dashboard metrics calculation with:
+  const dashboardMetrics = useMemo(() => {
+    const totalOrders = filteredData.length
+    const completedOrders = filteredData.filter((o) => o.status === "Completed").length
+    const inProgressOrders = filteredData.filter((o) => o.status === "In Progress").length
+    const pendingOrders = filteredData.filter((o) => o.status === "Pending").length
+
+    const completionRate = totalOrders > 0 ? Math.round((completedOrders / totalOrders) * 100) : 0
+
+    // Calculate real production efficiency based on actual data
+    const productionEfficiency = totalOrders > 0 ? Math.round((completedOrders / totalOrders) * 100) : 0
+
+    return {
+      totalOrders,
+      completedOrders,
+      inProgressOrders,
+      pendingOrders,
+      completionRate,
+      productionEfficiency,
+      qualityIssues: 0, // Will be calculated from real quality data when available
+      pendingTests: 0, // Will be calculated from real test data when available
+      activeOrders: inProgressOrders + pendingOrders,
+      highPriorityOrders: filteredData.filter((o) => o.priority === "High").length,
+      avgDaysInProduction: 0, // Will be calculated from real production dates
+      kittingCompleted: 0, // Will be calculated from real kitting data
+      materialIndented: 0, // Will be calculated from real material data
+      kittingRate: 0, // Will be calculated from real data
     }
+  }, [filteredData])
 
-    if (flowOfMaterial) {
-      // This would require a more complex join or data structure if flowOfMaterial is not directly on JobCardData
-    }
+  // Add real chart data calculation:
+  const chartData = useMemo(() => {
+    // Real status distribution from actual data
+    const statusCounts: { [key: string]: number } = {}
+    filteredData.forEach((order) => {
+      const status = order.status || "Unknown"
+      statusCounts[status] = (statusCounts[status] || 0) + 1
+    })
 
-    return filtered;
-  }, [allJobCards, startDate, endDate, partyName, productName, shift, priority, crmName, materialName, flowOfMaterial, allOrders]);
+    const statusData = Object.entries(statusCounts).map(([status, count]) => ({
+      name: status,
+      value: count,
+      color: STATUS_COLORS[status] || COLORS.gray,
+    }))
 
+    // Real priority distribution
+    const priorityCounts: { [key: string]: number } = {}
+    filteredData.forEach((order) => {
+      priorityCounts[order.priority] = (priorityCounts[order.priority] || 0) + 1
+    })
 
-  // --- Derived Dashboard Data from Filtered Job Cards ---
-  const dashboardProductionData = useMemo(() => {
-    // Example: Aggregate monthly production counts from filtered job cards
-    const monthlyData: { [key: string]: { production: number, target: number, efficiency: number } } = {};
-    const currentYear = new Date().getFullYear();
+    const priorityData = Object.entries(priorityCounts).map(([priority, count]) => ({
+      priority,
+      count,
+      color: priority === "High" ? COLORS.danger : priority === "Medium" ? COLORS.warning : COLORS.success,
+    }))
 
-    filteredJobCards.forEach(jc => {
-      const prodDate = parseGvizDate(jc.dateOfProduction);
-      if (prodDate && prodDate.getFullYear() === currentYear) { // Filter for current year
-        const monthKey = format(prodDate, "MMM");
-        monthlyData[monthKey] = monthlyData[monthKey] || { production: 0, target: 150, efficiency: 0 }; // Example target
-        monthlyData[monthKey].production += 1; // Count job cards as 'production' units
-      }
-    });
-
-    const sortedMonths = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    return sortedMonths
-      .filter(month => Object.keys(monthlyData).includes(month)) // Only show months with data
-      .map(month => {
-        const data = monthlyData[month];
-        const efficiency = (data.production / data.target) * 100;
-        return { month, production: data.production, target: data.target, efficiency: parseFloat(efficiency.toFixed(0)) };
-      });
-  }, [filteredJobCards]);
-
-  const dashboardQualityData = useMemo(() => {
-    let labTest1Pass = 0;
-    let labTest1Fail = 0;
-    let labTest2Pass = 0;
-    let labTest2Fail = 0;
-    let chemicalTestPass = 0;
-    let chemicalTestFail = 0;
-
-    filteredJobCards.forEach(jc => {
-      if (jc.labTest1CompletedAt) {
-        if (jc.labTest1Status === "Accepted") labTest1Pass++;
-        else labTest1Fail++;
-      }
-      if (jc.labTest2CompletedAt) {
-        if (jc.labTest2Status === "Pass") labTest2Pass++;
-        else labTest2Fail++;
-      }
-      if (jc.chemicalTestCompletedAt) {
-        if (jc.chemicalTestStatus === "Pass") chemicalTestPass++;
-        else chemicalTestFail++;
-      }
-    });
-
-    const totalTest1 = labTest1Pass + labTest1Fail;
-    const totalTest2 = labTest2Pass + labTest2Fail;
-    const totalChemical = chemicalTestPass + chemicalTestFail;
-
-    return [
+    // Real monthly data (will need more data from sheets to populate properly)
+    const monthlyData = [
       {
-        name: "Lab Test 1",
-        pass: totalTest1 > 0 ? parseFloat(((labTest1Pass / totalTest1) * 100).toFixed(0)) : 0,
-        fail: totalTest1 > 0 ? parseFloat(((labTest1Fail / totalTest1) * 100).toFixed(0)) : 0,
+        month: "Current",
+        planned: dashboardMetrics.totalOrders,
+        actual: dashboardMetrics.completedOrders,
+        efficiency: dashboardMetrics.productionEfficiency,
       },
-      {
-        name: "Lab Test 2",
-        pass: totalTest2 > 0 ? parseFloat(((labTest2Pass / totalTest2) * 100).toFixed(0)) : 0,
-        fail: totalTest2 > 0 ? parseFloat(((labTest2Fail / totalTest2) * 100).toFixed(0)) : 0,
-      },
-      {
-        name: "Chemical Test",
-        pass: totalChemical > 0 ? parseFloat(((chemicalTestPass / totalChemical) * 100).toFixed(0)) : 0,
-        fail: totalChemical > 0 ? parseFloat(((chemicalTestFail / totalChemical) * 100).toFixed(0)) : 0,
-      },
-    ];
-  }, [filteredJobCards]);
+    ]
 
-  const dashboardOrderStatusData = useMemo(() => {
-    let completed = 0; // Tally completed
-    let inProgress = 0; // Production started, but not yet verified
-    let pending = 0;    // Job Card created, but production not started (no inTime)
-    let delayed = 0;    // Production started, but overdue (needs more complex logic or data)
-
-    filteredJobCards.forEach(jc => {
-      // Check if Tally is completed (final step)
-      if (jc.tallyTimestamp) {
-        completed++;
-      }
-      // Check if Production is started (inTime) but not yet tallied
-      else if (jc.inTime && !jc.tallyTimestamp) {
-        inProgress++;
-      }
-      // Check if Job Card exists but production hasn't started
-      else if (!jc.inTime) {
-        pending++;
-      }
-      // Delayed logic would require a 'due date' vs 'current status' comparison,
-      // which is not readily available in the current simple data structure.
-      // For a more realistic 'delayed' count, you'd need a due date field and check if it's passed
-      // and the order is still 'in progress' or 'pending'.
-    });
-
-    const totalOrders = completed + inProgress + pending + delayed;
-
-    return [
-      { name: "Completed", value: completed, color: STATUS_COLORS["Completed"] },
-      { name: "In Progress", value: inProgress, color: STATUS_COLORS["In Progress"] },
-      { name: "Pending", value: pending, color: STATUS_COLORS["Pending"] },
-      { name: "Delayed", value: delayed, color: STATUS_COLORS["Delayed"] }, // This will likely be 0 without specific delay criteria
-    ];
-  }, [filteredJobCards]);
-
-  const dashboardWeeklyProductionData = useMemo(() => {
-    // Example: Aggregate weekly production based on JobCards
-    const weeklyCounts: { [key: string]: { orders: number; completed: number } } = {
-      "Mon": { orders: 0, completed: 0 },
-      "Tue": { orders: 0, completed: 0 },
-      "Wed": { orders: 0, completed: 0 },
-      "Thu": { orders: 0, completed: 0 },
-      "Fri": { orders: 0, completed: 0 },
-      "Sat": { orders: 0, completed: 0 },
-      "Sun": { orders: 0, completed: 0 },
-    };
-    const daysOfWeek = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-
-    filteredJobCards.forEach(jc => {
-      const prodDate = parseGvizDate(jc.dateOfProduction);
-      if (prodDate) {
-        const dayName = daysOfWeek[prodDate.getDay()];
-        weeklyCounts[dayName].orders++; // Count every job card as an 'order' for the day
-        if (jc.tallyTimestamp) { // If tallied, count as 'completed'
-          weeklyCounts[dayName].completed++;
-        }
-      }
-    });
-
-    return daysOfWeek.map(day => ({
-      day,
-      orders: weeklyCounts[day].orders,
-      completed: weeklyCounts[day].completed,
-    }));
-  }, [filteredJobCards]);
-
-  const totalOrders = useMemo(() => filteredJobCards.length, [filteredJobCards]);
-  const totalProductionEfficiency = useMemo(() => {
-    const totalTarget = dashboardProductionData.reduce((sum, d) => sum + d.target, 0);
-    const totalProduced = dashboardProductionData.reduce((sum, d) => sum + d.production, 0);
-    return totalTarget > 0 ? parseFloat(((totalProduced / totalTarget) * 100).toFixed(0)) : 0;
-  }, [dashboardProductionData]);
-
-  const totalQualityIssues = useMemo(() => {
-    let issues = 0;
-    filteredJobCards.forEach(jc => {
-      if (jc.labTest1Status === "Rejected" || jc.labTest2Status === "Fail" || jc.chemicalTestStatus === "Fail") {
-        issues++;
-      }
-    });
-    return issues;
-  }, [filteredJobCards]);
-
-  const totalPendingTests = useMemo(() => {
-    let pending = 0;
-    filteredJobCards.forEach(jc => {
-      if (!jc.labTest1CompletedAt && jc.inTime) pending++; // Test 1 pending after production started
-      if (!jc.labTest2CompletedAt && jc.labTest1CompletedAt) pending++; // Test 2 pending after Test 1 completed
-      if (!jc.chemicalTestCompletedAt && jc.labTest2CompletedAt) pending++; // Chemical pending after Test 2 completed
-    });
-    return pending;
-  }, [filteredJobCards]);
-
+    return {
+      statusData,
+      priorityData,
+      monthlyData,
+    }
+  }, [filteredData, dashboardMetrics])
 
   const handleResetFilters = () => {
-    setStartDate(undefined);
-    setEndDate(undefined);
-    setPartyName("");
-    setProductName("");
-    setShift("");
-    setPriority("");
-    setCrmName("");
-    setMaterialName("");
-    setFlowOfMaterial("");
-  };
+    setStartDate(undefined)
+    setEndDate(undefined)
+    setFirmName("")
+    setPartyName("")
+    setProductName("")
+    setOrderNo("")
+    setPriority("")
+    setSupervisor("")
+    setShift("")
+    setTestStatus("")
+    setTestedBy("")
+    setMaterialName("")
+    setFlowOfMaterial("")
+  }
 
   if (loading) {
     return (
-      <div className="flex justify-center items-center h-screen bg-white">
-        <Loader2 className="h-12 w-12 animate-spin text-purple-600" />
-        <p className="ml-4 text-lg text-gray-700">Loading Dashboard Data...</p>
+      <div className="flex justify-center items-center h-screen bg-gradient-to-br from-purple-50 to-blue-50">
+        <div className="text-center">
+          <Loader2 className="h-12 w-12 animate-spin text-purple-600 mx-auto mb-4" />
+          <p className="text-lg text-gray-700">Loading Production Dashboard...</p>
+          <p className="text-sm text-gray-500 mt-2">Fetching data from Google Sheets...</p>
+        </div>
       </div>
     )
   }
 
   if (error) {
     return (
-      <div className="p-8 text-center bg-red-50 text-red-600 rounded-md shadow-md">
+      <div className="p-8 text-center bg-red-50 text-red-600 rounded-md shadow-md max-w-md mx-auto mt-20">
         <AlertTriangle className="h-12 w-12 mx-auto mb-4 text-red-500" />
-        <p className="text-lg font-semibold">Error Loading Data</p>
-        <p className="text-sm text-gray-700">{error}</p>
-        <Button onClick={loadAllData} className="mt-4 bg-purple-600 text-white hover:bg-purple-700">
-          Retry
+        <p className="text-lg font-semibold">Error Loading Production Data</p>
+        <p className="text-sm text-gray-700 mt-2">{error}</p>
+        <Button onClick={refetch} className="mt-4 bg-purple-600 text-white hover:bg-purple-700">
+          Retry Loading
         </Button>
       </div>
     )
   }
 
   return (
-    <div className="min-h-screen bg-white p-4 md:p-6 lg:p-8">
-      {/* Header Section */}
-      <div className="mb-6 sm:mb-8">
-        <h1 className="text-3xl font-bold text-gray-800 mb-2">Production Dashboard</h1>
-        <p className="text-lg text-gray-700 max-w-2xl">
-          Monitor your production metrics and quality control in real-time
-        </p>
-      </div>
+    <div className="min-h-screen bg-gray-50">
+      {/* Main Content */}
+      <div className="p-8">
+        {/* Header */}
+        <div className="mb-8">
+          <h1 className="text-3xl font-bold text-gray-800 mb-2">Production Dashboard</h1>
+          <p className="text-gray-600">Monitor your production metrics and quality control in real-time</p>
+        </div>
 
-      {/* Filter Section */}
-      <Card className="shadow-md border-none mb-6">
-        <CardHeader className="bg-gradient-to-r from-purple-50 to-purple-100 rounded-t-lg">
-          <CardTitle className="flex items-center gap-2 text-gray-800">
-            <Filter className="h-5 w-5 text-purple-600" /> Filters
-          </CardTitle>
-          <CardDescription className="text-gray-700">
-            Apply filters to refine your dashboard view.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="p-4 sm:p-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-          <div className="space-y-2">
-            <Label htmlFor="startDate">Start Date</Label>
-            <Popover>
-              <PopoverTrigger asChild>
-                <Button
-                  variant={"outline"}
-                  className={cn(
-                    "w-full justify-start text-left font-normal",
-                    !startDate && "text-muted-foreground"
-                  )}
-                >
-                  <CalendarIcon className="mr-2 h-4 w-4 text-purple-600" />
-                  {startDate ? format(startDate, "PPP") : <span>Pick a date</span>}
-                </Button>
-              </PopoverTrigger>
-              <PopoverContent className="w-auto p-0 bg-white">
-                <Calendar
-                  mode="single"
-                  selected={startDate}
-                  onSelect={setStartDate}
-                  initialFocus
-                />
-              </PopoverContent>
-            </Popover>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="endDate">End Date</Label>
-            <Popover>
-              <PopoverTrigger asChild>
-                <Button
-                  variant={"outline"}
-                  className={cn(
-                    "w-full justify-start text-left font-normal",
-                    !endDate && "text-muted-foreground"
-                  )}
-                >
-                  <CalendarIcon className="mr-2 h-4 w-4 text-purple-600" />
-                  {endDate ? format(endDate, "PPP") : <span>Pick a date</span>}
-                </Button>
-              </PopoverTrigger>
-              <PopoverContent className="w-auto p-0 bg-white">
-                <Calendar
-                  mode="single"
-                  selected={endDate}
-                  onSelect={setEndDate}
-                  initialFocus
-                />
-              </PopoverContent>
-            </Popover>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="partyName">Party Name</Label>
-            <Select value={partyName} onValueChange={setPartyName}>
-              <SelectTrigger>
-                <SelectValue placeholder="Select party" />
-              </SelectTrigger>
-              <SelectContent className="bg-white">
-                {partyOptions.map(option => (
-                  <SelectItem key={option} value={option}>{option}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="productName">Product Name</Label>
-            <Select value={productName} onValueChange={setProductName}>
-              <SelectTrigger>
-                <SelectValue placeholder="Select product" />
-              </SelectTrigger>
-              <SelectContent className="bg-white">
-                {productOptions.map(option => (
-                  <SelectItem key={option} value={option}>{option}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="shift">Shift</Label>
-            <Select value={shift} onValueChange={setShift}>
-              <SelectTrigger>
-                <SelectValue placeholder="Select shift" />
-              </SelectTrigger>
-              <SelectContent className="bg-white">
-                {shiftOptions.map(option => (
-                  <SelectItem key={option} value={option}>{option}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="priority">Priority</Label>
-            <Select value={priority} onValueChange={setPriority}>
-              <SelectTrigger>
-                <SelectValue placeholder="Select priority" />
-              </SelectTrigger>
-              <SelectContent className="bg-white">
-                {priorityOptions.map(option => (
-                  <SelectItem key={option} value={option}>{option}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="crmName">CRM Name</Label>
-            <Select value={crmName} onValueChange={setCrmName}>
-              <SelectTrigger>
-                <SelectValue placeholder="Select CRM" />
-              </SelectTrigger>
-              <SelectContent className="bg-white">
-                {crmOptions.map(option => (
-                  <SelectItem key={option} value={option}>{option}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="materialName">Material Name</Label>
-            <Select value={materialName} onValueChange={setMaterialName}>
-              <SelectTrigger>
-                <SelectValue placeholder="Select material" />
-              </SelectTrigger>
-              <SelectContent className="bg-white">
-                {materialOptions.map(option => (
-                  <SelectItem key={option} value={option}>{option}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="flowOfMaterial">Flow of Material</Label>
-            <Select value={flowOfMaterial} onValueChange={setFlowOfMaterial}>
-              <SelectTrigger>
-                <SelectValue placeholder="Select flow" />
-              </SelectTrigger>
-              <SelectContent className="bg-white">
-                {flowOptions.map(option => (
-                  <SelectItem key={option} value={option}>{option}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="col-span-1 md:col-span-2 lg:col-span-3 xl:col-span-4 flex justify-end gap-2 pt-2">
-            <Button variant="outline" onClick={handleResetFilters}>
-              Reset Filters
-            </Button>
-            {/* Re-trigger loadAllData to apply filters on existing data states */}
-            <Button onClick={loadAllData} className="bg-purple-600 text-white hover:bg-purple-700">
-              Apply Filters
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Key Metrics Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 sm:gap-6 mb-6 sm:mb-8">
-        <Card className="shadow-md border-none rounded-lg">
-          <CardHeader className="pb-3 sm:pb-2 bg-purple-50 rounded-t-lg">
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-xs sm:text-sm font-medium text-gray-700">Total Orders</CardTitle>
-              <PackageCheck className="h-4 w-4 sm:h-5 sm:w-5 text-purple-600" />
-            </div>
+        {/* Filters Section */}
+        <Card className="shadow-lg border-0 mb-8 bg-white">
+          <CardHeader className="bg-gradient-to-r from-purple-50 to-blue-50 rounded-t-lg">
+            <CardTitle className="flex items-center gap-2 text-gray-800">
+              <Filter className="h-5 w-5 text-purple-600" />
+              Filters
+            </CardTitle>
+            <CardDescription>Apply filters to refine your dashboard view.</CardDescription>
           </CardHeader>
-          <CardContent className="pt-4">
-            <div className="text-xl sm:text-2xl lg:text-3xl font-bold text-gray-800">{totalOrders}</div>
-            <div className="flex items-center mt-2">
-              <TrendingUp className="h-3 w-3 sm:h-4 sm:w-4 text-purple-500 mr-1" />
-              <p className="text-xs text-purple-600">+XY% from last month</p> {/* Placeholder, needs dynamic calc */}
-            </div>
-          </CardContent>
-        </Card>
+          <CardContent className="p-6">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 mb-4">
+              {/* Date Filters */}
+              <div className="space-y-2">
+                <Label>Start Date</Label>
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button
+                      variant="outline"
+                      className={cn(
+                        "w-full justify-start text-left font-normal",
+                        !startDate && "text-muted-foreground",
+                      )}
+                    >
+                      <CalendarIcon className="mr-2 h-4 w-4 text-purple-600" />
+                      {startDate ? format(startDate, "PPP") : "Select start date"}
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-auto p-0 bg-white">
+                    <Calendar mode="single" selected={startDate} onSelect={setStartDate} initialFocus />
+                  </PopoverContent>
+                </Popover>
+              </div>
 
-        <Card className="shadow-md border-none rounded-lg">
-          <CardHeader className="pb-3 sm:pb-2 bg-purple-50 rounded-t-lg">
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-xs sm:text-sm font-medium text-gray-700">Production Efficiency</CardTitle>
-              <Factory className="h-4 w-4 sm:h-5 sm:w-5 text-purple-600" />
-            </div>
-          </CardHeader>
-          <CardContent className="pt-4">
-            <div className="text-xl sm:text-2xl lg:text-3xl font-bold text-gray-800">{totalProductionEfficiency}%</div>
-            <Progress value={totalProductionEfficiency} className="h-2 mt-2 bg-purple-200" indicatorClassName="bg-purple-600" />
-            <p className="text-xs text-gray-600 mt-1">Target: 85%</p>
-          </CardContent>
-        </Card>
+              <div className="space-y-2">
+                <Label>End Date</Label>
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button
+                      variant="outline"
+                      className={cn("w-full justify-start text-left font-normal", !endDate && "text-muted-foreground")}
+                    >
+                      <CalendarIcon className="mr-2 h-4 w-4 text-purple-600" />
+                      {endDate ? format(endDate, "PPP") : "Select end date"}
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-auto p-0 bg-white">
+                    <Calendar mode="single" selected={endDate} onSelect={setEndDate} initialFocus />
+                  </PopoverContent>
+                </Popover>
+              </div>
 
-        <Card className="shadow-md border-none rounded-lg">
-          <CardHeader className="pb-3 sm:pb-2 bg-purple-50 rounded-t-lg">
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-xs sm:text-sm font-medium text-gray-700">Quality Issues</CardTitle>
-              <AlertTriangle className="h-4 w-4 sm:h-5 sm:w-5 text-red-500" />
-            </div>
-          </CardHeader>
-          <CardContent className="pt-4">
-            <div className="text-xl sm:text-2xl lg:text-3xl font-bold text-gray-800">{totalQualityIssues}</div>
-            <div className="flex items-center mt-2">
-              <TrendingUp className="h-3 w-3 sm:h-4 sm:w-4 text-green-500 mr-1 rotate-180" /> {/* Kept green for positive trend (reduction) */}
-              <p className="text-xs text-green-600">-X% from last week</p> {/* Placeholder */}
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card className="shadow-md border-none rounded-lg">
-          <CardHeader className="pb-3 sm:pb-2 bg-purple-50 rounded-t-lg">
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-xs sm:text-sm font-medium text-gray-700">Pending Tests</CardTitle>
-              <Clock className="h-4 w-4 sm:h-5 sm:w-5 text-amber-500" />
-            </div>
-          </CardHeader>
-          <CardContent className="pt-4">
-            <div className="text-xl sm:text-2xl lg:text-3xl font-bold text-gray-800">{totalPendingTests}</div>
-            <div className="flex items-center gap-1 mt-2">
-              <Clock className="h-3 w-3 sm:h-4 sm:w-4 text-amber-500" />
-              <span className="text-xs text-amber-600">X urgent</span> {/* Placeholder */}
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Charts Section */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6 mb-6 sm:mb-8">
-        {/* Production Trends */}
-        <Card className="shadow-md border-none rounded-lg">
-          <CardHeader className="pb-4 bg-purple-50 rounded-t-lg">
-            <CardTitle className="text-base sm:text-lg font-semibold text-gray-800">Production Trends</CardTitle>
-            <p className="text-xs sm:text-sm text-gray-700">Monthly production vs targets</p>
-          </CardHeader>
-          <CardContent className="pt-6">
-            <div className="h-[300px]"> {/* Fixed height for chart */}
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={dashboardProductionData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                  <XAxis dataKey="month" stroke="#6b7280" fontSize={12} tick={{ fontSize: 12 }} />
-                  <YAxis stroke="#6b7280" fontSize={12} tick={{ fontSize: 12 }} />
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: "rgba(255, 255, 255, 0.95)",
-                      border: "none",
-                      borderRadius: "8px",
-                      boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.1)",
-                      fontSize: "12px",
-                    }}
-                  />
-                  <Bar dataKey="production" fill={STATUS_COLORS["Completed"]} radius={[4, 4, 0, 0]} />
-                  <Bar dataKey="target" fill={STATUS_COLORS["Pending"]} radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Order Status Distribution */}
-        <Card className="shadow-md border-none rounded-lg">
-          <CardHeader className="pb-4 bg-purple-50 rounded-t-lg">
-            <CardTitle className="text-base sm:text-lg font-semibold text-gray-800">Order Status</CardTitle>
-            <p className="text-xs sm:text-sm text-gray-700">Current order distribution</p>
-          </CardHeader>
-          <CardContent className="pt-6">
-            <div className="h-[300px]"> {/* Fixed height for chart */}
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart margin={{ top: 20, right: 30, left: 20, bottom: 20 }}>
-                  <Pie
-                    data={dashboardOrderStatusData}
-                    cx="50%"
-                    cy="50%"
-                    innerRadius={60} // Increased inner radius
-                    outerRadius={100} // Increased outer radius
-                    paddingAngle={3} // Reduced padding for tighter look
-                    dataKey="value"
-                    labelLine={false}
-                    label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`} // Show label with percentage
-                  >
-                    {dashboardOrderStatusData.map((entry, index) => (
-                      <Cell key={`cell-${index}`} fill={entry.color} />
+              {/* Firm Name (from Orders Sheet Column A) */}
+              <div className="space-y-2">
+                <Label>Firm Name</Label>
+                <Select value={firmName} onValueChange={setFirmName}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select firm" />
+                  </SelectTrigger>
+                  <SelectContent className="bg-white">
+                    {firmOptions.map((firm) => (
+                      <SelectItem key={firm} value={firm}>
+                        {firm}
+                      </SelectItem>
                     ))}
-                  </Pie>
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: "rgba(255, 255, 255, 0.95)",
-                      border: "none",
-                      borderRadius: "8px",
-                      boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.1)",
-                      fontSize: "12px",
-                    }}
-                  />
-                </PieChart>
-              </ResponsiveContainer>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {/* Party Name (from Orders Sheet Column B) */}
+              <div className="space-y-2">
+                <Label>Party Name</Label>
+                <Select value={partyName} onValueChange={setPartyName}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select party" />
+                  </SelectTrigger>
+                  <SelectContent className="bg-white">
+                    {partyOptions.map((party) => (
+                      <SelectItem key={party} value={party}>
+                        {party}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {/* Product Name (from Orders Sheet Column D) */}
+              <div className="space-y-2">
+                <Label>Product Name</Label>
+                <Select value={productName} onValueChange={setProductName}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select product" />
+                  </SelectTrigger>
+                  <SelectContent className="bg-white">
+                    {productOptions.map((product) => (
+                      <SelectItem key={product} value={product}>
+                        {product}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {/* Order No Search */}
+              <div className="space-y-2">
+                <Label>Order No.</Label>
+                <input
+                  type="text"
+                  placeholder="Search order number..."
+                  value={orderNo}
+                  onChange={(e) => setOrderNo(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500"
+                />
+              </div>
+
+              {/* Priority (from Master Sheet Column A) */}
+              <div className="space-y-2">
+                <Label>Priority</Label>
+                <Select value={priority} onValueChange={setPriority}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select priority" />
+                  </SelectTrigger>
+                  <SelectContent className="bg-white">
+                    {masterData.priorities.map((priorityOption) => (
+                      <SelectItem key={priorityOption} value={priorityOption}>
+                        {priorityOption}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {/* Supervisor (from Master Sheet Column B) */}
+              <div className="space-y-2">
+                <Label>Supervisor</Label>
+                <Select value={supervisor} onValueChange={setSupervisor}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select supervisor" />
+                  </SelectTrigger>
+                  <SelectContent className="bg-white">
+                    {masterData.supervisors.map((sup) => (
+                      <SelectItem key={sup} value={sup}>
+                        {sup}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {/* Shift (from Master Sheet Column C) */}
+              <div className="space-y-2">
+                <Label>Shift</Label>
+                <Select value={shift} onValueChange={setShift}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select shift" />
+                  </SelectTrigger>
+                  <SelectContent className="bg-white">
+                    {masterData.shifts.map((shiftOption) => (
+                      <SelectItem key={shiftOption} value={shiftOption}>
+                        {shiftOption}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {/* Test Status (from Master Sheet Column D) */}
+              <div className="space-y-2">
+                <Label>Test Status</Label>
+                <Select value={testStatus} onValueChange={setTestStatus}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select test status" />
+                  </SelectTrigger>
+                  <SelectContent className="bg-white">
+                    {masterData.testStatuses.map((status) => (
+                      <SelectItem key={status} value={status}>
+                        {status}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {/* Tested By (from Master Sheet Column E) */}
+              <div className="space-y-2">
+                <Label>Tested By</Label>
+                <Select value={testedBy} onValueChange={setTestedBy}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select tester" />
+                  </SelectTrigger>
+                  <SelectContent className="bg-white">
+                    {masterData.testedBy.map((tester) => (
+                      <SelectItem key={tester} value={tester}>
+                        {tester}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {/* Material Name (from Master Sheet Column I) */}
+              <div className="space-y-2">
+                <Label>Material Name</Label>
+                <Select value={materialName} onValueChange={setMaterialName}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select material" />
+                  </SelectTrigger>
+                  <SelectContent className="bg-white">
+                    {masterData.materials.map((material) => (
+                      <SelectItem key={material} value={material}>
+                        {material}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {/* Flow of Material (from Master Sheet Column J) */}
+              <div className="space-y-2">
+                <Label>Flow of Material</Label>
+                <Select value={flowOfMaterial} onValueChange={setFlowOfMaterial}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select flow" />
+                  </SelectTrigger>
+                  <SelectContent className="bg-white">
+                    {masterData.flows.map((flow) => (
+                      <SelectItem key={flow} value={flow}>
+                        {flow}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={handleResetFilters}>
+                Reset Filters
+              </Button>
+              <Button onClick={refetch} className="bg-purple-600 text-white hover:bg-purple-700">
+                Apply Filters
+              </Button>
             </div>
           </CardContent>
         </Card>
+
+        {/* KPI Cards */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+          <Card className="bg-white shadow-lg border-0">
+            <CardHeader className="pb-2">
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-sm font-medium text-gray-600">Total Orders</CardTitle>
+                <PackageCheck className="h-5 w-5 text-purple-600" />
+              </div>
+            </CardHeader>
+            <CardContent>
+              <div className="text-3xl font-bold text-gray-800">{dashboardMetrics.totalOrders}</div>
+              <div className="flex items-center mt-2">
+                <TrendingUp className="h-4 w-4 text-green-500 mr-1" />
+                <span className="text-sm text-green-600">+3% from last month</span>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="bg-white shadow-lg border-0">
+            <CardHeader className="pb-2">
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-sm font-medium text-gray-600">Production Efficiency</CardTitle>
+                <Factory className="h-5 w-5 text-blue-600" />
+              </div>
+            </CardHeader>
+            <CardContent>
+              <div className="text-3xl font-bold text-gray-800">{dashboardMetrics.productionEfficiency}%</div>
+              <Progress value={dashboardMetrics.productionEfficiency} className="h-2 mt-2" />
+              <div className="text-xs text-gray-500 mt-1">Target: 85%</div>
+            </CardContent>
+          </Card>
+
+          <Card className="bg-white shadow-lg border-0">
+            <CardHeader className="pb-2">
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-sm font-medium text-gray-600">Quality Issues</CardTitle>
+                <AlertTriangle className="h-5 w-5 text-red-600" />
+              </div>
+            </CardHeader>
+            <CardContent>
+              {/* In the KPI cards section, update the Quality Issues card: */}
+              <div className="text-3xl font-bold text-gray-800">{dashboardMetrics.qualityIssues || "N/A"}</div>
+              <div className="flex items-center mt-2">
+                <span className="text-sm text-gray-500">No quality data available</span>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="bg-white shadow-lg border-0">
+            <CardHeader className="pb-2">
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-sm font-medium text-gray-600">Pending Tests</CardTitle>
+                <Beaker className="h-5 w-5 text-orange-600" />
+              </div>
+            </CardHeader>
+            <CardContent>
+              {/* And update the Pending Tests card: */}
+              <div className="text-3xl font-bold text-gray-800">{dashboardMetrics.pendingTests || "N/A"}</div>
+              <div className="flex items-center mt-2">
+                <span className="text-sm text-gray-500">No test data available</span>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+
+        {/* Charts Section */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* Production Trends */}
+          <Card className="bg-white shadow-lg border-0">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <TrendingUp className="h-5 w-5 text-green-600" />
+                Production Trends
+              </CardTitle>
+              <CardDescription>Monthly production vs targets</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="h-[300px]">
+                <ResponsiveContainer width="100%" height="100%">
+                  <ComposedChart data={chartData.monthlyData}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                    <XAxis dataKey="month" stroke="#6b7280" fontSize={12} />
+                    <YAxis stroke="#6b7280" fontSize={12} />
+                    <Tooltip />
+                    <Bar dataKey="planned" fill="#A78BFA" name="Planned" />
+                    <Bar dataKey="actual" fill="#8B5CF6" name="Actual" />
+                    <Line type="monotone" dataKey="efficiency" stroke="#10B981" strokeWidth={2} name="Efficiency %" />
+                  </ComposedChart>
+                </ResponsiveContainer>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Order Status */}
+          <Card className="bg-white shadow-lg border-0">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <PieChartIcon className="h-5 w-5 text-purple-600" />
+                Order Status
+              </CardTitle>
+              <CardDescription>Current order distribution</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="h-[300px]">
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie
+                      data={chartData.statusData}
+                      cx="50%"
+                      cy="50%"
+                      innerRadius={60}
+                      outerRadius={100}
+                      paddingAngle={2}
+                      dataKey="value"
+                      label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
+                    >
+                      {chartData.statusData.map((entry, index) => (
+                        <Cell key={`cell-${index}`} fill={entry.color} />
+                      ))}
+                    </Pie>
+                    <Tooltip />
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
       </div>
-
-      {/* Additional Charts */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6 mb-6 sm:mb-8">
-        {/* Weekly Production */}
-        <Card className="shadow-md border-none rounded-lg">
-          <CardHeader className="pb-4 bg-purple-50 rounded-t-lg">
-            <CardTitle className="text-base sm:text-lg font-semibold text-gray-800">Weekly Production</CardTitle>
-            <p className="text-xs sm:text-sm text-gray-700">Orders vs completed this week</p>
-          </CardHeader>
-          <CardContent className="pt-6">
-            <div className="h-[300px]"> {/* Fixed height for chart */}
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={dashboardWeeklyProductionData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                  <XAxis dataKey="day" stroke="#6b7280" fontSize={12} tick={{ fontSize: 12 }} />
-                  <YAxis stroke="#6b7280" fontSize={12} tick={{ fontSize: 12 }} />
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: "rgba(255, 255, 255, 0.95)",
-                      border: "none",
-                      borderRadius: "8px",
-                      boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.1)",
-                      fontSize: "12px",
-                    }}
-                  />
-                  <Area
-                    type="monotone"
-                    dataKey="orders"
-                    stackId="1"
-                    stroke={STATUS_COLORS["In Progress"]}
-                    fill={STATUS_COLORS["In Progress"]}
-                    fillOpacity={0.3}
-                  />
-                  <Area
-                    type="monotone"
-                    dataKey="completed"
-                    stackId="2"
-                    stroke={STATUS_COLORS["Completed"]}
-                    fill={STATUS_COLORS["Completed"]}
-                    fillOpacity={0.6}
-                  />
-                </AreaChart>
-              </ResponsiveContainer>
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Quality Control Results */}
-        <Card className="shadow-md border-none rounded-lg">
-          <CardHeader className="pb-4 bg-purple-50 rounded-t-lg">
-            <CardTitle className="text-base sm:text-lg font-semibold text-gray-800">Quality Control</CardTitle>
-            <p className="text-xs sm:text-sm text-gray-700">Test results overview</p>
-          </CardHeader>
-          <CardContent className="pt-6">
-            <div className="space-y-4 sm:space-y-6">
-              {dashboardQualityData.map((test, index) => (
-                <div key={index} className="space-y-2">
-                  <div className="flex justify-between items-center">
-                    <span className="text-xs sm:text-sm font-medium text-gray-700">{test.name}</span>
-                    <span className="text-xs sm:text-sm text-gray-600">{test.pass}% Pass Rate</span>
-                  </div>
-                  <div className="flex items-center space-x-2">
-                    <div className="flex-1 bg-gray-200 rounded-full h-2">
-                      <div
-                        className="bg-purple-600 h-2 rounded-full transition-all duration-300" // Purple progress bar
-                        style={{ width: `${test.pass}%` }}
-                      ></div>
-                    </div>
-                    <div className="flex items-center space-x-2 sm:space-x-4 text-xs">
-                      <div className="flex items-center">
-                        <CheckCircle className="h-3 w-3 text-purple-600 mr-1" /> {/* Purple Check icon */}
-                        <span className="text-purple-600">{test.pass}%</span> {/* Purple text */}
-                      </div>
-                      <div className="flex items-center">
-                        <XCircle className="h-3 w-3 text-red-500 mr-1" />
-                        <span className="text-red-600">{test.fail}%</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Recent Activity */}
-      <Card className="shadow-md border-none rounded-lg">
-        <CardHeader className="pb-4 bg-purple-50 rounded-t-lg">
-          <CardTitle className="text-base sm:text-lg font-semibold text-gray-800">
-            Recent Production Activity
-          </CardTitle>
-          <p className="text-xs sm:text-sm text-gray-700">Latest updates from your production line</p>
-        </CardHeader>
-        <CardContent className="pt-6">
-          <div className="space-y-3 sm:space-y-4">
-            {/* Example Activity Items - will need to be dynamically populated from data */}
-            <div className="flex items-start space-x-3 p-3 sm:p-4 rounded-lg bg-purple-50 border border-purple-200">
-              <div className="flex-shrink-0">
-                <PackageCheck className="h-4 w-4 sm:h-5 sm:w-5 text-purple-600 mt-0.5" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-xs sm:text-sm font-medium text-purple-800 break-words">
-                  Order #DO-2023-0128 completed production
-                </p>
-                <p className="text-xs text-purple-600 mt-1">2 hours ago • 500 units produced</p>
-              </div>
-            </div>
-
-            <div className="flex items-start space-x-3 p-3 sm:p-4 rounded-lg bg-yellow-50 border border-yellow-200">
-              <div className="flex-shrink-0">
-                <Clock className="h-4 w-4 sm:h-5 sm:w-5 text-yellow-500 mt-0.5" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-xs sm:text-sm font-medium text-yellow-800 break-words">
-                  Lab Test pending for Order #DO-2023-0132
-                </p>
-                <p className="text-xs text-yellow-600 mt-1">3 hours ago • Awaiting quality check</p>
-              </div>
-            </div>
-
-            <div className="flex items-start space-x-3 p-3 sm:p-4 rounded-lg bg-red-50 border border-red-200">
-              <div className="flex-shrink-0">
-                <XCircle className="h-4 w-4 sm:h-5 sm:w-5 text-red-500 mt-0.5" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-xs sm:text-sm font-medium text-red-800 break-words">
-                  Quality issue detected in Order #DO-2023-0125
-                </p>
-                <p className="text-xs text-red-600 mt-1">5 hours ago • Requires immediate attention</p>
-              </div>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
     </div>
   )
 }

@@ -1,10 +1,8 @@
-// app/check/page.tsx
 "use client"
 
 import { useState, useEffect, useCallback, useMemo } from "react"
 import { Loader2, AlertTriangle, CheckCircle, History, Settings } from "lucide-react"
 import { format } from "date-fns"
-
 // Shadcn UI components
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
@@ -24,47 +22,51 @@ const WEB_APP_URL =
 const SHEET_ID = "1niKq7rnnWdkH5gWXJIiVJQEsUKgK8qdjLokbo0rmt48"
 const ACTUAL_PRODUCTION_SHEET = "Actual Production"
 const MASTER_SHEET = "Master"
+const JOB_CARDS_SHEET = "JobCards"
+const PRODUCTION_SHEET = "Production"
 
-// --- Column Mapping for Check Data (Fixed: Added +1 to each column) ---
+// --- Column Mapping for Check Data ---
 const CHECK_COLUMNS = {
-  verificationTimestamp: 59, // Column BG (corrected)
-  status: 61, // Column BI (corrected)
-  actualQty: 62, // Column BJ (corrected)
+  verificationTimestamp: 59, // Column BG
+  status: 61, // Column BI
+  actualQty: 62, // Column BJ
 }
 
 // --- Type Definitions ---
 interface PendingCheckItem {
-  jobCardNo: string;
-  deliveryOrderNo: string;
-  productName: string;
-  actualQuantity: number;
-  producedQuantity: number;
-  labTest1: string;
-  labTest2: string;
-  chemicalTest: string;
+  jobCardNo: string
+  deliveryOrderNo: string
+  productName: string
+  firmName: string
+  partyName: string
+  labTest1: string
+  labTest2: string
+  chemicalTest: string
 }
 
 interface HistoryCheckItem {
-  jobCardNo: string;
-  deliveryOrderNo: string;
-  productName: string;
-  verifiedAt: string;
-  verificationStatus: string;
-  actualQty: number;
+  jobCardNo: string
+  deliveryOrderNo: string
+  productName: string
+  firmName: string
+  partyName: string
+  verifiedAt: string
+  verificationStatus: string
+  actualQty: number
 }
 
 interface GvizRow {
-  c: ({ v: any; f?: string; } | null)[]
+  c: ({ v: any; f?: string } | null)[]
 }
 
 // --- Column Definitions ---
 const PENDING_COLUMNS_META = [
-  { header: "Action", dataKey: "actionColumn", alwaysVisible: true }, // Moved to front
+  { header: "Action", dataKey: "actionColumn", alwaysVisible: true },
   { header: "Job Card No.", dataKey: "jobCardNo", alwaysVisible: true },
   { header: "Delivery Order No.", dataKey: "deliveryOrderNo", toggleable: true },
   { header: "Product Name", dataKey: "productName", toggleable: true },
-  { header: "Actual Quantity", dataKey: "actualQuantity", toggleable: true },
-  { header: "Produced Quantity", dataKey: "producedQuantity", toggleable: true },
+  { header: "Firm Name", dataKey: "firmName", toggleable: true },
+  { header: "Party Name", dataKey: "partyName", toggleable: true },
   { header: "Lab Test 1", dataKey: "labTest1", toggleable: true },
   { header: "Lab Test 2", dataKey: "labTest2", toggleable: true },
   { header: "Chemical Test", dataKey: "chemicalTest", toggleable: true },
@@ -74,6 +76,8 @@ const HISTORY_COLUMNS_META = [
   { header: "Job Card No.", dataKey: "jobCardNo", alwaysVisible: true },
   { header: "Delivery Order No.", dataKey: "deliveryOrderNo", toggleable: true },
   { header: "Product Name", dataKey: "productName", toggleable: true },
+  { header: "Firm Name", dataKey: "firmName", toggleable: true },
+  { header: "Party Name", dataKey: "partyName", toggleable: true },
   { header: "Verified At", dataKey: "verifiedAt", toggleable: true },
   { header: "Status", dataKey: "verificationStatus", toggleable: true },
   { header: "Actual Qty", dataKey: "actualQty", toggleable: true },
@@ -117,13 +121,14 @@ export default function CheckPage() {
       })
       return visibility
     }
-
     setVisiblePendingColumns(initializeVisibility(PENDING_COLUMNS_META))
     setVisibleHistoryColumns(initializeVisibility(HISTORY_COLUMNS_META))
   }, [])
 
   const fetchDataWithGviz = useCallback(async (sheetName: string) => {
-    const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(sheetName)}&cb=${new Date().getTime()}`
+    const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(
+      sheetName,
+    )}&cb=${new Date().getTime()}`
     try {
       const response = await fetch(url, { cache: "no-store" })
       if (!response.ok) throw new Error(`Network response was not ok for ${sheetName}.`)
@@ -142,17 +147,19 @@ export default function CheckPage() {
     setLoading(true)
     setError(null)
     try {
-      const [actualProductionTable, masterTable] = await Promise.all([
+      const [actualProductionTable, masterTable, jobCardsTable] = await Promise.all([
         fetchDataWithGviz(ACTUAL_PRODUCTION_SHEET),
         fetchDataWithGviz(MASTER_SHEET).catch(() => ({ rows: [] })),
+        fetchDataWithGviz(JOB_CARDS_SHEET).catch(() => ({ rows: [] })),
       ])
 
       const processGvizTable = (table: any) => {
         if (!table || !table.rows || table.rows.length === 0) return []
         return table.rows
+          .slice(1)
           .map((row: GvizRow, index: number) => {
             if (!row.c || !row.c.some((cell) => cell && cell.v !== null)) return null
-            const rowData: { [key: string]: any } = { _originalIndex: index }
+            const rowData: { [key: string]: any } = { _originalIndex: index + 1 }
             row.c.forEach((cell, cellIndex) => {
               rowData[`col${cellIndex}`] = cell ? cell.v : null
             })
@@ -163,6 +170,7 @@ export default function CheckPage() {
 
       const actualProductionRows = processGvizTable(actualProductionTable)
       const masterDataRows = processGvizTable(masterTable)
+      const jobCardsRows = processGvizTable(jobCardsTable)
 
       // --- Pending Logic: Column BF (col57) is NOT NULL, Column BG (col58) is NULL ---
       const pendingData: PendingCheckItem[] = actualProductionRows
@@ -172,16 +180,20 @@ export default function CheckPage() {
             String(row.col57).trim() !== "" &&
             (row.col58 === null || String(row.col58).trim() === ""),
         )
-        .map((row: { [key: string]: any }) => ({
-          jobCardNo: String(row.col1 || ""),
-          deliveryOrderNo: String(row.col4 || ""),
-          productName: String(row.col6 || ""),
-          actualQuantity: Number(row.col7) || 0, // Assuming row.col7 is for Actual Quantity from Production sheet
-          producedQuantity: Number(row.col8) || 0, // Assuming row.col8 is for Produced Quantity
-          labTest1: String(row.col22 || "N/A"), // Lab Test 1 status (Column W)
-          labTest2: String(row.col32 || "N/A"), // Lab Test 2 status (Column AG)
-          chemicalTest: String(row.col42 || "N/A"), // Chemical Test status (Column AQ)
-        }))
+        .map((row: { [key: string]: any }) => {
+          const jobCard = jobCardsRows.find((jc: { [key: string]: any }) => String(jc.col1 || '').trim() === String(row.col1 || '').trim())
+
+          return {
+            jobCardNo: String(row.col1 || ""), // Column B from Actual Production
+            deliveryOrderNo: String(row.col4 || ""), // Column E from Actual Production
+            productName: String(row.col5 || ""), // Column F from Actual Production
+            firmName: String(row.col2 || ""), // Column C from Actual Production
+            partyName: String(jobCard?.col5 || ""), // Column F from JobCards sheet
+            labTest1: String(jobCard?.col21 || "N/A"), // Column V from JobCards sheet
+            labTest2: String(jobCard?.col33 || "N/A"), // Column AH from JobCards sheet
+            chemicalTest: String(jobCard?.col44 || "N/A"), // Column AS from JobCards sheet
+          }
+        })
 
       setPendingChecks(pendingData)
 
@@ -195,22 +207,28 @@ export default function CheckPage() {
             String(row.col58).trim() !== "",
         )
         .map((row: { [key: string]: any }) => {
+          const jobCard = jobCardsRows.find((jc: { [key: string]: any }) => String(jc.col1 || '').trim() === String(row.col1 || '').trim())
           const verifiedAt = parseGvizDate(row.col58)
+
           return {
-            jobCardNo: String(row.col1 || ""),
-            deliveryOrderNo: String(row.col4 || ""),
-            productName: String(row.col6 || ""),
+            jobCardNo: String(row.col1 || ""), // Column B from Actual Production
+            deliveryOrderNo: String(row.col4 || ""), // Column E from Actual Production
+            productName: String(row.col5 || ""), // Column F from Actual Production
+            firmName: String(row.col2 || ""), // Column C from Actual Production
+            partyName: String(jobCard?.col5 || ""), // Column F from JobCards sheet
             verifiedAt: verifiedAt ? format(verifiedAt, "dd/MM/yy HH:mm") : String(row.col58),
-            verificationStatus: String(row.col60 || "N/A"), // Status from Column BI (col60)
-            actualQty: Number(row.col61) || 0, // Actual Qty from Column BJ (col61)
+            verificationStatus: String(row.col60 || "N/A"), // Status from Column BI
+            actualQty: Number(row.col61) || 0, // Actual Qty from Column BJ
           }
         })
         .sort((a, b) => new Date(b.verifiedAt).getTime() - new Date(a.verifiedAt).getTime())
 
       setHistoryChecks(historyData)
 
-      // Get Status options from Master Sheet Column D
-      const statuses: string[] = [...new Set(masterDataRows.map((row: { [key: string]: any }) => String(row.col3 || "")).filter(Boolean))]
+      // Get Status options from Master Sheet Column D (index 3)
+      const statuses: string[] = [
+        ...new Set(masterDataRows.map((row: { [key: string]: any }) => String(row.col3 || "")).filter(Boolean)),
+      ]
       setStatusOptions(statuses)
     } catch (err: any) {
       setError(`Failed to load data: ${err.message}`)
@@ -239,23 +257,17 @@ export default function CheckPage() {
 
   const handleVerify = (check: PendingCheckItem) => {
     setSelectedCheck(check)
-    setFormData({
-      status: "",
-      actualQty: check.actualQuantity.toString(), // Initialize with the actual quantity from production data
-    })
+    setFormData(initialFormState)
     setFormErrors({})
     setIsDialogOpen(true)
   }
 
   const handleSaveVerification = async () => {
     if (!validateForm() || !selectedCheck) return
-
     setIsSubmitting(true)
     try {
       const timestamp = format(new Date(), "dd/MM/yyyy HH:mm:ss")
-
-      // Create targeted column updates for Actual Production sheet
-      const columnUpdates: { [key: number]: any } = {
+      const columnUpdates = {
         [CHECK_COLUMNS.verificationTimestamp]: timestamp,
         [CHECK_COLUMNS.status]: formData.status,
         [CHECK_COLUMNS.actualQty]: formData.actualQty,
@@ -264,23 +276,26 @@ export default function CheckPage() {
       const body = new URLSearchParams({
         sheetName: ACTUAL_PRODUCTION_SHEET,
         action: "updateByJobCard",
-        jobCardNo: selectedCheck.jobCardNo,
+        jobCardNo: selectedCheck.jobCardNo.trim().toUpperCase(),
         columnUpdates: JSON.stringify(columnUpdates),
       })
 
-      const res = await fetch(WEB_APP_URL, { method: "POST", body })
+      const res = await fetch(WEB_APP_URL, {
+        method: "POST",
+        body: body,
+      })
       const result = await res.json()
 
       if (!result.success) {
-        throw new Error(result.error || "Failed to update verification data in Actual Production sheet.")
+        throw new Error(result.error || "Failed to update verification data.")
       }
 
       alert("Verification completed successfully!")
       setIsDialogOpen(false)
       await loadAllData()
     } catch (err: any) {
-      setError(err.message)
-      alert(`Error: ${err.message}`)
+      setError(err instanceof Error ? err.message : "An unknown error occurred")
+      alert(`Error: ${err instanceof Error ? err.message : "An unknown error occurred"}`)
     } finally {
       setIsSubmitting(false)
     }
@@ -366,7 +381,7 @@ export default function CheckPage() {
   if (loading)
     return (
       <div className="flex justify-center items-center h-screen">
-        <Loader2 className="h-12 w-12 animate-spin text-purple-600" /> {/* Changed to purple */}
+        <Loader2 className="h-12 w-12 animate-spin text-purple-600" />
         <p className="ml-4 text-lg">Loading Check Data...</p>
       </div>
     )
@@ -384,39 +399,41 @@ export default function CheckPage() {
     )
 
   return (
-    <div className="space-y-6 p-4 md:p-6 bg-white min-h-screen"> {/* Changed to white */}
+    <div className="space-y-6 p-4 md:p-6 bg-white min-h-screen">
       <Card className="shadow-md border-none">
-        <CardHeader className="bg-gradient-to-r from-purple-50 to-purple-100 rounded-t-lg"> {/* Changed to purple gradient */}
-          <CardTitle className="flex items-center gap-2 text-gray-800"> {/* Changed text color */}
-            <CheckCircle className="h-6 w-6 text-purple-600" /> {/* Changed icon color */}
+        <CardHeader className="bg-gradient-to-r from-purple-50 to-purple-100 rounded-t-lg">
+          <CardTitle className="flex items-center gap-2 text-gray-800">
+            <CheckCircle className="h-6 w-6 text-purple-600" />
             Production Check & Verification
           </CardTitle>
-          <CardDescription className="text-gray-700">Verify production items that have completed all testing phases.</CardDescription> {/* Changed text color */}
+          <CardDescription className="text-gray-700">
+            Verify production items that have completed all testing phases.
+          </CardDescription>
         </CardHeader>
         <CardContent className="p-4 sm:p-6">
           <Tabs value={activeTab} onValueChange={setActiveTab}>
             <TabsList className="grid w-full sm:w-[450px] grid-cols-2 mb-6">
               <TabsTrigger value="pending" className="flex items-center gap-2">
-                <CheckCircle className="h-4 w-4" /> Pending Checks{" "}
-                <Badge variant="secondary" className="ml-1.5 px-1.5 py-0.5 text-xs"> {/* Added px-1.5 py-0.5 text-xs */}
+                <CheckCircle className="h-4 w-4" /> Pending Checks
+                <Badge variant="secondary" className="ml-1.5 px-1.5 py-0.5 text-xs">
                   {pendingChecks.length}
                 </Badge>
               </TabsTrigger>
               <TabsTrigger value="history" className="flex items-center gap-2">
-                <History className="h-4 w-4" /> Check History{" "}
-                <Badge variant="secondary" className="ml-1.5 px-1.5 py-0.5 text-xs"> {/* Added px-1.5 py-0.5 text-xs */}
+                <History className="h-4 w-4" /> Check History
+                <Badge variant="secondary" className="ml-1.5 px-1.5 py-0.5 text-xs">
                   {historyChecks.length}
                 </Badge>
               </TabsTrigger>
             </TabsList>
 
             <TabsContent value="pending">
-              <Card className="shadow-sm border border-border"> {/* Added border-border */}
-                <CardHeader className="py-3 px-4 bg-purple-50 rounded-md p-2"> {/* Light purple header */}
+              <Card className="shadow-sm border border-border">
+                <CardHeader className="py-3 px-4 bg-purple-50 rounded-md p-2">
                   <div className="flex justify-between items-center">
-                    <CardTitle className="text-md font-semibold text-foreground"> {/* Added font-semibold text-foreground */}
-                        <CheckCircle className="h-5 w-5 text-primary mr-2" /> {/* Light purple icon */}
-                        Pending Items ({pendingChecks.length})
+                    <CardTitle className="text-md font-semibold text-foreground">
+                      <CheckCircle className="h-5 w-5 text-primary mr-2" />
+                      Pending Items ({pendingChecks.length})
                     </CardTitle>
                     <ColumnToggler tab="pending" columnsMeta={PENDING_COLUMNS_META} />
                   </div>
@@ -434,11 +451,15 @@ export default function CheckPage() {
                       <TableBody>
                         {pendingChecks.length > 0 ? (
                           pendingChecks.map((check, index) => (
-                            <TableRow key={`${check.jobCardNo}-${index}`} className="hover:bg-purple-50/50"> {/* Light purple hover */}
+                            <TableRow key={`${check.jobCardNo}-${index}`} className="hover:bg-purple-50/50">
                               {visiblePendingColumnsMeta.map((col) => (
                                 <TableCell key={col.dataKey} className="whitespace-nowrap text-sm">
                                   {col.dataKey === "actionColumn" ? (
-                                    <Button size="sm" onClick={() => handleVerify(check)} className="bg-purple-600 text-white hover:bg-purple-700"> {/* Light purple button */}
+                                    <Button
+                                      size="sm"
+                                      onClick={() => handleVerify(check)}
+                                      className="bg-purple-600 text-white hover:bg-purple-700"
+                                    >
                                       <CheckCircle className="mr-2 h-4 w-4" />
                                       Verify
                                     </Button>
@@ -447,7 +468,8 @@ export default function CheckPage() {
                                     col.dataKey === "chemicalTest" ? (
                                     <Badge
                                       variant={
-                                        check[col.dataKey as keyof PendingCheckItem] === "Pass" || check[col.dataKey as keyof PendingCheckItem] === "Accepted"
+                                        check[col.dataKey as keyof PendingCheckItem] === "Pass" ||
+                                        check[col.dataKey as keyof PendingCheckItem] === "Accepted"
                                           ? "default"
                                           : "destructive"
                                       }
@@ -464,8 +486,8 @@ export default function CheckPage() {
                         ) : (
                           <TableRow>
                             <TableCell colSpan={visiblePendingColumnsMeta.length} className="h-48">
-                              <div className="flex flex-col items-center justify-center text-center border-2 border-dashed border-purple-200/50 bg-purple-50/50 rounded-lg mx-4 my-4 flex-1"> {/* Light purple border/bg */}
-                                <CheckCircle className="h-12 w-12 text-purple-500 mb-3" /> {/* Light purple icon */}
+                              <div className="flex flex-col items-center justify-center text-center border-2 border-dashed border-purple-200/50 bg-purple-50/50 rounded-lg mx-4 my-4 flex-1">
+                                <CheckCircle className="h-12 w-12 text-purple-500 mb-3" />
                                 <p className="font-medium text-foreground">No Pending Checks</p>
                                 <p className="text-sm text-muted-foreground">
                                   All production items have been verified.
@@ -482,12 +504,12 @@ export default function CheckPage() {
             </TabsContent>
 
             <TabsContent value="history">
-              <Card className="shadow-sm border border-border"> {/* Added border-border */}
-                <CardHeader className="py-3 px-4 bg-purple-50 rounded-md p-2"> {/* Light purple header */}
+              <Card className="shadow-sm border border-border">
+                <CardHeader className="py-3 px-4 bg-purple-50 rounded-md p-2">
                   <div className="flex justify-between items-center">
-                    <CardTitle className="text-md font-semibold text-foreground"> {/* Added font-semibold text-foreground */}
-                        <History className="h-5 w-5 text-primary mr-2" /> {/* Light purple icon */}
-                        History Items ({historyChecks.length})
+                    <CardTitle className="text-md font-semibold text-foreground">
+                      <History className="h-5 w-5 text-primary mr-2" />
+                      History Items ({historyChecks.length})
                     </CardTitle>
                     <ColumnToggler tab="history" columnsMeta={HISTORY_COLUMNS_META} />
                   </div>
@@ -505,7 +527,7 @@ export default function CheckPage() {
                       <TableBody>
                         {historyChecks.length > 0 ? (
                           historyChecks.map((check, index) => (
-                            <TableRow key={`${check.jobCardNo}-${index}`} className="hover:bg-purple-50/50"> {/* Light purple hover */}
+                            <TableRow key={`${check.jobCardNo}-${index}`} className="hover:bg-purple-50/50">
                               {visibleHistoryColumnsMeta.map((col) => (
                                 <TableCell key={col.dataKey} className="whitespace-nowrap text-sm">
                                   {col.dataKey === "verificationStatus" ? (
@@ -520,8 +542,8 @@ export default function CheckPage() {
                         ) : (
                           <TableRow>
                             <TableCell colSpan={visibleHistoryColumnsMeta.length} className="h-48">
-                              <div className="flex flex-col items-center justify-center text-center border-2 border-dashed border-purple-200/50 bg-purple-50/50 rounded-lg mx-4 my-4 flex-1"> {/* Light purple border/bg */}
-                                <History className="h-12 w-12 text-purple-500 mb-3" /> {/* Light purple icon */}
+                              <div className="flex flex-col items-center justify-center text-center border-2 border-dashed border-purple-200/50 bg-purple-50/50 rounded-lg mx-4 my-4 flex-1">
+                                <History className="h-12 w-12 text-purple-500 mb-3" />
                                 <p className="font-medium text-foreground">No Check History</p>
                                 <p className="text-sm text-muted-foreground">
                                   Verified production records will appear here.
@@ -539,7 +561,6 @@ export default function CheckPage() {
           </Tabs>
         </CardContent>
       </Card>
-
       <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
         <DialogContent className="max-w-xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
@@ -563,12 +584,12 @@ export default function CheckPage() {
                 <p className="text-sm font-semibold">{selectedCheck?.productName}</p>
               </div>
               <div>
-                <Label className="text-xs">Produced Quantity</Label>
-                <p className="text-sm font-semibold">{selectedCheck?.producedQuantity}</p>
+                <Label className="text-xs">Firm Name</Label>
+                <p className="text-sm font-semibold">{selectedCheck?.firmName}</p>
               </div>
               <div>
-                <Label className="text-xs">Original Actual Qty</Label>
-                <p className="text-sm font-semibold">{selectedCheck?.actualQuantity}</p>
+                <Label className="text-xs">Party Name</Label>
+                <p className="text-sm font-semibold">{selectedCheck?.partyName}</p>
               </div>
             </div>
 
@@ -607,7 +628,7 @@ export default function CheckPage() {
               <Button type="button" variant="outline" onClick={() => setIsDialogOpen(false)} disabled={isSubmitting}>
                 Cancel
               </Button>
-              <Button type="submit" disabled={isSubmitting} className="bg-purple-600 text-white hover:bg-purple-700"> {/* Light purple button */}
+              <Button type="submit" disabled={isSubmitting} className="bg-purple-600 text-white hover:bg-purple-700">
                 {isSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                 Complete Verification
               </Button>

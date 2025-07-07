@@ -4,8 +4,6 @@ import { useState, useEffect, useCallback, useMemo } from "react"
 import { Loader2, AlertTriangle, CalendarIcon, TestTube, History, Settings, Eye } from "lucide-react"
 import { format } from "date-fns"
 import { useGoogleSheet, parseGvizDate } from "@/lib/g-sheets"
-
-// Shadcn UI components
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
@@ -13,15 +11,15 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Calendar } from "@/components/ui/calendar"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
-import { Textarea } from "@/components/ui/textarea"
 import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Calendar } from "@/components/ui/calendar"
+import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
 
-// --- Type Definitions ---
+// Type Definitions
 interface RawMaterial {
   name: string
   quantity: number | string
@@ -39,9 +37,7 @@ interface ProductionItem {
   supervisorName: string
   shift: string
   rawMaterials: RawMaterial[]
-  quantities: string
   machineHours: string
-  productionNotes: string
 }
 
 interface HistoryItem {
@@ -59,52 +55,78 @@ interface HistoryItem {
   whatToBeMixed: string
   flowOfMaterial: string
   sieveAnalysisTest: string
-  notes: string
   test1CompletedAt: string
 }
 
-// Re-defining TimeInput to simply be a string for HH:MM:SS
-interface TimeInput {
-  h: string // Will now be 'HH:MM:SS' string
-  m: string // Not used directly for input, but kept for consistency
-  s: string // Not used directly for input, but kept for consistency
-}
-
-// --- Configuration ---
+// Constants
 const WEB_APP_URL =
   "https://script.google.com/macros/s/AKfycbwpDkP_Wmk8udmH6XsWPvpXgj-e3rGNxNJlOdAVXEWiCJWh3LI8CjIH4oJW5k5pjKFCvg/exec"
 const JOBCARDS_SHEET = "JobCards"
 const MASTER_SHEET = "Master"
+const PRODUCTION_SHEET = "Production"
+const ACTUAL_PRODUCTION_SHEET = "Actual Production"
 
-// --- Column Mapping for Lab Test 1 Data ---
-const LAB_TEST_COLUMNS = {
-  test1CompletedAt: 20, // Column T (index 19, but 1-based = 20)
-  testStatus: 22, // Column V (index 21, but 1-based = 22)
-  dateOfTest: 23, // Column W (index 22, but 1-based = 23)
-  wcPercentage: 24, // Column X (index 23, but 1-based = 24)
-  testedBy: 25, // Column Y (index 24, but 1-based = 25)
-  initialSettingTime: 26, // Column Z (index 25, but 1-based = 26)
-  flowOfMaterial: 27, // Column AA (index 26, but 1-based = 27)
-  finalSettingTime: 28, // Column AB (index 27, but 1-based = 28)
-  whatToBeMixed: 29, // Column AC (index 28, but 1-based = 29)
-  sieveAnalysis: 30, // Column AD (index 29, but 1-based = 30)
+// Add this function for formatting machine hours
+const formatMachineHours = (hours) => {
+  if (!hours || hours === "-") return "-"
+  const hoursStr = String(hours)
+  if (/^\d{1,2}:\d{2}:\d{2}$/.test(hoursStr)) return hoursStr
+  if (hoursStr.includes("Date(")) {
+    const match = hoursStr.match(/Date$$(\d+),(\d+),(\d+),(\d+),(\d+),(\d+)$$/)
+    if (match) {
+      const [, year, month, day, h, m, s] = match
+      return `${h.padStart(2, "0")}:${m.padStart(2, "0")}:${s.padStart(2, "0")}`
+    }
+    const numbers = hoursStr.match(/\d+/g)
+    if (numbers && numbers.length >= 6) {
+      const h = numbers[numbers.length - 3]
+      const m = numbers[numbers.length - 2]
+      const s = numbers[numbers.length - 1]
+      return `${h.padStart(2, "0")}:${m.padStart(2, "0")}:${s.padStart(2, "0")}`
+    }
+  }
+  if (hours instanceof Date) {
+    const h = hours.getHours()
+    const m = hours.getMinutes()
+    const s = hours.getSeconds()
+    return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`
+  }
+  const numHours = Number.parseFloat(hoursStr)
+  if (!isNaN(numHours)) {
+    const wholeHours = Math.floor(numHours)
+    const minutes = Math.floor((numHours - wholeHours) * 60)
+    const seconds = Math.floor(((numHours - wholeHours) * 60 - minutes) * 60)
+    return `${wholeHours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`
+  }
+  return hoursStr
 }
 
-// --- Column Definitions ---
+// Column Mapping for Lab Test 1 Data
+const LAB_TEST_1_COLUMNS = {
+  test1CompletedAt: 20, // Column T
+  testStatus: 22, // Column V
+  dateOfTest: 23, // Column W
+  wcPercentage: 24, // Column X
+  testedBy: 25, // Column Y
+  initialSettingTime: 26, // Column Z
+  flowOfMaterial: 27, // Column AA
+  finalSettingTime: 28, // Column AB
+  whatToBeMixed: 29, // Column AC
+  sieveAnalysis: 30, // Column AD
+}
+
+// Column Definitions
 const PENDING_COLUMNS_META = [
   { header: "Action", dataKey: "actionColumn", alwaysVisible: true, toggleable: false },
   { header: "Job Card No.", dataKey: "jobCardNo", alwaysVisible: true, toggleable: false },
   { header: "Delivery Order No.", dataKey: "deliveryOrderNo", toggleable: true },
-  { header: "Quantity", dataKey: "quantity", toggleable: true },
   { header: "Expected Delivery Date", dataKey: "expectedDeliveryDate", toggleable: true },
   { header: "Priority", dataKey: "priority", toggleable: true },
   { header: "Date of Production", dataKey: "dateOfProduction", toggleable: true },
   { header: "Supervisor Name", dataKey: "supervisorName", toggleable: true },
   { header: "Shift", dataKey: "shift", toggleable: true },
   { header: "Raw Materials", dataKey: "rawMaterials", toggleable: true },
-  { header: "Quantities", dataKey: "quantities", toggleable: true },
   { header: "Machine Hours", dataKey: "machineHours", toggleable: true },
-  { header: "Production Notes", dataKey: "productionNotes", toggleable: true },
 ]
 
 const HISTORY_COLUMNS_META = [
@@ -120,7 +142,6 @@ const HISTORY_COLUMNS_META = [
   { header: "What To Be Mixed", dataKey: "whatToBeMixed", toggleable: true },
   { header: "Flow of Material", dataKey: "flowOfMaterial", toggleable: true },
   { header: "Sieve Analysis Test", dataKey: "sieveAnalysisTest", toggleable: true },
-  { header: "Notes", dataKey: "notes", toggleable: true },
 ]
 
 // Initial State for Form
@@ -129,8 +150,8 @@ const initialFormState = {
   testStatus: "",
   wcPercentage: "",
   testedBy: "",
-  initialSettingTime: { h: "", m: "", s: "" }, // Change this to single string for HH:MM:SS
-  finalSettingTime: { h: "", m: "", s: "" }, // Change this to single string for HH:MM:SS
+  initialSettingTime: { h: "", m: "", s: "" },
+  finalSettingTime: { h: "", m: "", s: "" },
   whatToBeMixed: "",
   flowOfMaterial: "",
   sieveAnalysis: "",
@@ -156,16 +177,44 @@ export default function LabTesting1Page() {
 
   const { fetchData: fetchJobCardsData } = useGoogleSheet(JOBCARDS_SHEET)
   const { fetchData: fetchMasterData } = useGoogleSheet(MASTER_SHEET)
+  const { fetchData: fetchProductionData } = useGoogleSheet(PRODUCTION_SHEET)
+  const { fetchData: fetchActualProductionData } = useGoogleSheet(ACTUAL_PRODUCTION_SHEET)
+
+  const processGvizTable = (table) => {
+    if (!table || !table.rows || table.rows.length === 0) {
+      return []
+    }
+    const firstDataRowIndex = table.rows.findIndex(
+      (r) => r && r.c && r.c.some((cell) => cell && cell.v !== null && cell.v !== ""),
+    )
+    if (firstDataRowIndex === -1) return []
+
+    const colIds = table.cols.map((col) => col.id)
+    const dataRows = table.rows.slice(firstDataRowIndex)
+
+    return dataRows
+      .map((row, rowIndex) => {
+        if (!row || !row.c || row.c.every((cell) => !cell || cell.v === null || cell.v === "")) {
+          return null
+        }
+        const rowData = { _rowIndex: firstDataRowIndex + rowIndex + 1 }
+        row.c.forEach((cell, cellIndex) => {
+          const colId = colIds[cellIndex]
+          if (colId) rowData[colId] = cell ? cell.v : null
+        })
+        return rowData
+      })
+      .filter(Boolean)
+  }
 
   useEffect(() => {
-    const initializeVisibility = (columnsMeta: any[]) => {
-      const visibility: Record<string, boolean> = {}
+    const initializeVisibility = (columnsMeta) => {
+      const visibility = {}
       columnsMeta.forEach((col) => {
         visibility[col.dataKey] = col.alwaysVisible !== false
       })
       return visibility
     }
-
     setVisiblePendingColumns(initializeVisibility(PENDING_COLUMNS_META))
     setVisibleHistoryColumns(initializeVisibility(HISTORY_COLUMNS_META))
   }, [])
@@ -174,16 +223,34 @@ export default function LabTesting1Page() {
     setLoading(true)
     setError(null)
     try {
-      const [jobCardsTable, masterTable] = await Promise.all([fetchJobCardsData(), fetchMasterData()])
+      const [jobCardsTable, masterTable, productionTable, actualProductionTable] = await Promise.all([
+        fetchJobCardsData(),
+        fetchMasterData(),
+        fetchProductionData(),
+        fetchActualProductionData(),
+      ])
 
-      const processGvizTable = (table: any) => {
-        if (!table || !table.rows || table.rows.length === 0) return []
-        return table.rows
-          .map((row: any, index: number) => {
-            if (!row.c || !row.c.some((cell: any) => cell && cell.v !== null)) return null
-            const rowData: any = { _rowIndex: index + 5 }
-            row.c.forEach((cell: any, cellIndex: number) => {
-              rowData[`col${cellIndex}`] = cell ? cell.v : null
+      const processGvizTable = (table) => {
+        if (!table || !table.rows || table.rows.length === 0) {
+          return []
+        }
+        const firstDataRowIndex = table.rows.findIndex(
+          (r) => r && r.c && r.c.some((cell) => cell && cell.v !== null && cell.v !== ""),
+        )
+        if (firstDataRowIndex === -1) return []
+
+        const colIds = table.cols.map((col) => col.id)
+        const dataRows = table.rows.slice(firstDataRowIndex)
+
+        return dataRows
+          .map((row, rowIndex) => {
+            if (!row || !row.c || row.c.every((cell) => !cell || cell.v === null || cell.v === "")) {
+              return null
+            }
+            const rowData = { _rowIndex: firstDataRowIndex + rowIndex + 1 }
+            row.c.forEach((cell, cellIndex) => {
+              const colId = colIds[cellIndex]
+              if (colId) rowData[colId] = cell ? cell.v : null
             })
             return rowData
           })
@@ -192,126 +259,175 @@ export default function LabTesting1Page() {
 
       const jobCardDataRows = processGvizTable(jobCardsTable)
       const masterDataRows = processGvizTable(masterTable)
+      const productionDataRows = processGvizTable(productionTable)
+      const actualProductionDataRows = processGvizTable(actualProductionTable)
 
-      // Parse raw materials from job card data (assuming they're stored in specific columns)
-      const parseRawMaterials = (row: any): RawMaterial[] => {
-        const materials: RawMaterial[] = []
-        // Assuming raw materials are stored in columns 30-49 (name, quantity pairs)
-        for (let i = 0; i < 10; i++) {
-          const name = row[`col${30 + i * 2}`]
-          const quantity = row[`col${31 + i * 2}`]
-          if (name) {
-            materials.push({ name: String(name), quantity: quantity || 0 })
+      // Create a map for actual production data using the same logic as production page
+      const productionDataMap = new Map()
+      actualProductionDataRows.forEach((row) => {
+        const jobCardNo = String(row.B || "").trim()
+        if (jobCardNo) {
+          const materials = []
+          const materialColumns = [
+            "I",
+            "J",
+            "K",
+            "L",
+            "M",
+            "N",
+            "O",
+            "P",
+            "Q",
+            "R",
+            "S",
+            "T",
+            "U",
+            "V",
+            "W",
+            "X",
+            "Y",
+            "Z",
+            "AA",
+            "AB",
+            "AC",
+            "AD",
+            "AE",
+            "AF",
+            "AG",
+            "AH",
+            "AI",
+            "AJ",
+            "AK",
+            "AL",
+            "AM",
+            "AN",
+            "AO",
+            "AP",
+            "AQ",
+            "AR",
+            "AS",
+            "AT",
+            "AU",
+            "AV",
+          ]
+
+          for (let i = 0; i < materialColumns.length; i += 2) {
+            const name = row[materialColumns[i]]
+            const quantity = row[materialColumns[i + 1]]
+            if (name && String(name).trim()) {
+              materials.push({ name: String(name).trim(), quantity: quantity || 0 })
+            }
           }
-        }
-        return materials
-      }
 
-      // --- Pending Logic: Column S (col18) is NOT NULL, Column T (col19) is NULL ---
-      const pendingData: ProductionItem[] = jobCardDataRows
+          productionDataMap.set(jobCardNo, {
+            jobCardNo: jobCardNo,
+            machineHours: String(row.AW || "-").trim(),
+            rawMaterials: materials,
+          })
+        }
+      })
+
+      // Filter pending tests: Column S filled and T empty
+      const pendingData = jobCardDataRows
         .filter(
-          (row: any) =>
-            row.col18 !== null &&
-            String(row.col18).trim() !== "" &&
-            (row.col19 === null || String(row.col19).trim() === ""),
+          (row) => row.S !== null && String(row.S).trim() !== "" && (row.T === null || String(row.T).trim() === ""),
         )
-        .map((row: any) => ({
-          _rowIndex: row._rowIndex,
-          jobCardNo: String(row.col1 || ""),
-          deliveryOrderNo: String(row.col4 || ""),
-          productName: String(row.col6 || ""),
-          quantity: Number(row.col7 || 0),
-          expectedDeliveryDate: row.col12 ? format(parseGvizDate(row.col12), "dd/MM/yyyy") : "",
-          priority: String(row.col11 || ""),
-          dateOfProduction: row.col8 ? format(parseGvizDate(row.col8), "dd/MM/yyyy") : "",
-          supervisorName: String(row.col3 || ""),
-          shift: String(row.col9 || ""),
-          rawMaterials: parseRawMaterials(row),
-          quantities: String(row.col7 || ""),
-          machineHours: String(row.col50 || ""),
-          productionNotes: String(row.col14 || ""),
-        }))
+        .map((row) => {
+          const jobCardNo = String(row.B || "")
+          const deliveryOrderNo = String(row.E || "")
+
+          // Find production row by delivery order no
+          const productionRow = productionDataRows.find(
+            (prodRow) => String(prodRow.B || "").trim() === deliveryOrderNo.trim(),
+          )
+
+          // Get actual production data
+          const productionData = productionDataMap.get(jobCardNo)
+
+          return {
+            _rowIndex: row._rowIndex,
+            jobCardNo: jobCardNo,
+            deliveryOrderNo: deliveryOrderNo,
+            productName: String(row.G || ""),
+            quantity: Number(row.H || 0),
+            dateOfProduction: row.I ? format(parseGvizDate(row.I), "dd/MM/yyyy") : "",
+            supervisorName: String(row.D || ""),
+            shift: String(row.J || ""),
+            expectedDeliveryDate: productionRow?.G ? format(parseGvizDate(productionRow.G), "dd/MM/yyyy") : "",
+            priority: String(productionRow?.H || ""),
+            rawMaterials: productionData ? productionData.rawMaterials : [],
+            machineHours: productionData ? productionData.machineHours : "-",
+          }
+        })
 
       setPendingTests(pendingData)
 
-      const historyFiltered: HistoryItem[] = jobCardDataRows
-        .filter(
-          (row: any) =>
-            row.col18 !== null &&
-            String(row.col18).trim() !== "" &&
-            row.col19 !== null &&
-            String(row.col19).trim() !== "",
-        )
-        .map((row: any) => ({
+      // Filter history: Column S filled and T filled
+      const historyFiltered = jobCardDataRows
+        .filter((row) => row.S !== null && String(row.S).trim() !== "" && row.T !== null && String(row.T).trim() !== "")
+        .map((row) => ({
           _rowIndex: row._rowIndex,
-          jobCardNo: String(row.col1 || ""),
-          deliveryOrderNo: String(row.col4 || ""),
-          productName: String(row.col6 || ""),
-          quantity: Number(row.col7 || 0),
-          testStatus: String(row.col21 || ""),
-          dateOfTest: row.col22 ? format(parseGvizDate(row.col22), "dd/MM/yyyy") : "",
-          testedBy: String(row.col51 || ""), // Assuming tested by is in a specific column
-          wcPercentage: String(row.col23 || ""),
-          finalSettingTime: String(row.col26 || ""),
-          initialSettingTime: String(row.col24 || ""),
-          whatToBeMixed: String(row.col27 || ""),
-          flowOfMaterial: String(row.col25 || ""),
-          sieveAnalysisTest: String(row.col28 || ""),
-          notes: String(row.col14 || ""),
-          test1CompletedAt: parseGvizDate(row.col19)
-            ? format(parseGvizDate(row.col19), "dd/MM/yy HH:mm")
-            : String(row.col19),
+          jobCardNo: String(row.B || ""),
+          deliveryOrderNo: String(row.E || ""),
+          productName: String(row.G || ""),
+          quantity: Number(row.H || 0),
+          testStatus: String(row.V || ""),
+          dateOfTest: row.W ? format(parseGvizDate(row.W), "dd/MM/yyyy") : "",
+          testedBy: String(row.Y || ""),
+          wcPercentage: String(row.X || ""),
+          finalSettingTime: row.AB ? formatMachineHours(row.AB) : "-",
+          initialSettingTime: row.Z ? formatMachineHours(row.Z) : "-",
+          whatToBeMixed: String(row.AC || ""),
+          flowOfMaterial: String(row.AA || ""),
+          sieveAnalysisTest: String(row.AD || ""),
+          test1CompletedAt: parseGvizDate(row.T) ? format(parseGvizDate(row.T), "dd/MM/yy HH:mm") : String(row.T),
         }))
         .sort((a, b) => new Date(b.test1CompletedAt).getTime() - new Date(a.test1CompletedAt).getTime())
 
       setHistoryTests(historyFiltered)
 
-      const flowOptions: string[] = [
-        ...new Set(masterDataRows.map((row: any) => String(row.col10 || "")).filter(Boolean)),
-      ]
+      // Set options from master data
+      const flowOptions = [...new Set(masterDataRows.map((row) => String(row.K || "")).filter(Boolean))]
       setFlowOfMaterialOptions(flowOptions)
 
-      const statuses: string[] = [...new Set(masterDataRows.map((row: any) => String(row.col3 || "")).filter(Boolean))]
+      const statuses = [...new Set(masterDataRows.map((row) => String(row.D || "")).filter(Boolean))]
       setStatusOptions(statuses)
 
-      // Get Tested By options from Master Sheet Column E
-      const testedByOpts: string[] = [
-        ...new Set(masterDataRows.map((row: any) => String(row.col4 || "")).filter(Boolean)),
-      ]
+      const testedByOpts = [...new Set(masterDataRows.map((row) => String(row.E || "")).filter(Boolean))]
       setTestedByOptions(testedByOpts)
-    } catch (err: any) {
+    } catch (err) {
+      console.error("Error in loadAllData:", err)
       setError(`Failed to load data: ${err.message}`)
     } finally {
       setLoading(false)
     }
-  }, [fetchJobCardsData, fetchMasterData])
+  }, [fetchJobCardsData, fetchMasterData, fetchProductionData, fetchActualProductionData])
 
   useEffect(() => {
     loadAllData()
   }, [loadAllData])
 
-  const handleOpenLabTesting = (production: ProductionItem) => {
+  const handleOpenLabTesting = (production) => {
     setSelectedProduction(production)
     setFormData(initialFormState)
     setFormErrors({})
     setIsDialogOpen(true)
   }
 
-  const handleFormChange = (field: string, value: any) => {
+  const handleFormChange = (field, value) => {
     setFormData((prev) => ({ ...prev, [field]: value }))
   }
 
-  // Modified handleTimeChange to directly update the HH:MM:SS string
-  const handleTimeInputChange = (field: "initialSettingTime" | "finalSettingTime", value: string) => {
+  const handleTimeInputChange = (field, value) => {
     setFormData((prev) => ({
       ...prev,
-      [field]: { h: value, m: "", s: "" }, // Store the full string in 'h' for now
+      [field]: { ...prev[field], h: value },
     }))
   }
 
   const validateForm = () => {
-    const errors: Record<string, string> = {}
-    const timeRegex = /^(?:2[0-3]|[01]?[0-9]):[0-5]?[0-9]:[0-5]?[0-9]$/ // HH:MM:SS regex
+    const errors = {}
+    const timeRegex = /^(?:2[0-3]|[01]?[0-9]):[0-5]?[0-9]:[0-5]?[0-9]$/
 
     if (!formData.testStatus) errors.testStatus = "Status is required."
     if (!formData.dateOfTest) errors.dateOfTest = "Date of Test is required."
@@ -322,13 +438,9 @@ export default function LabTesting1Page() {
       errors.wcPercentage = "Percentage cannot be over 100."
     }
     if (!formData.testedBy) errors.testedBy = "Tested By is required."
-
-    // Validate initialSettingTime
     if (formData.initialSettingTime.h && !timeRegex.test(formData.initialSettingTime.h)) {
       errors.initialSettingTime = "Initial Setting Time must be in HH:MM:SS format."
     }
-
-    // Validate finalSettingTime
     if (formData.finalSettingTime.h && !timeRegex.test(formData.finalSettingTime.h)) {
       errors.finalSettingTime = "Final Setting Time must be in HH:MM:SS format."
     }
@@ -337,50 +449,45 @@ export default function LabTesting1Page() {
     return Object.keys(errors).length === 0
   }
 
-  // Updated formatTime to simply return the stored HH:MM:SS string
-  const formatTime = (time: TimeInput) => {
-    return time.h || "" // Returns the HH:MM:SS string or empty if not set
-  }
-
   const handleSaveLabTest = async () => {
     if (!validateForm() || !selectedProduction) return
 
     setIsSubmitting(true)
     try {
+      const jobCardNo = selectedProduction.jobCardNo.trim().toUpperCase()
       const timestamp = format(new Date(), "dd/MM/yyyy HH:mm:ss")
 
-      // Create targeted column updates instead of a full row array
       const columnUpdates = {
-        [LAB_TEST_COLUMNS.test1CompletedAt]: timestamp,
-        [LAB_TEST_COLUMNS.testStatus]: formData.testStatus,
-        [LAB_TEST_COLUMNS.dateOfTest]: format(formData.dateOfTest, "dd/MM/yyyy"),
-        [LAB_TEST_COLUMNS.wcPercentage]: formData.wcPercentage,
-        [LAB_TEST_COLUMNS.testedBy]: formData.testedBy,
-        [LAB_TEST_COLUMNS.initialSettingTime]: formatTime(formData.initialSettingTime),
-        [LAB_TEST_COLUMNS.flowOfMaterial]: formData.flowOfMaterial,
-        [LAB_TEST_COLUMNS.finalSettingTime]: formatTime(formData.finalSettingTime),
-        [LAB_TEST_COLUMNS.whatToBeMixed]: formData.whatToBeMixed,
-        [LAB_TEST_COLUMNS.sieveAnalysis]: formData.sieveAnalysis,
+        [LAB_TEST_1_COLUMNS.test1CompletedAt]: timestamp,
+        [LAB_TEST_1_COLUMNS.testStatus]: formData.testStatus,
+        [LAB_TEST_1_COLUMNS.dateOfTest]: format(formData.dateOfTest, "dd/MM/yyyy"),
+        [LAB_TEST_1_COLUMNS.wcPercentage]: formData.wcPercentage,
+        [LAB_TEST_1_COLUMNS.testedBy]: formData.testedBy,
+        [LAB_TEST_1_COLUMNS.initialSettingTime]: formData.initialSettingTime.h,
+        [LAB_TEST_1_COLUMNS.flowOfMaterial]: formData.flowOfMaterial,
+        [LAB_TEST_1_COLUMNS.finalSettingTime]: formData.finalSettingTime.h,
+        [LAB_TEST_1_COLUMNS.whatToBeMixed]: formData.whatToBeMixed,
+        [LAB_TEST_1_COLUMNS.sieveAnalysis]: formData.sieveAnalysis,
       }
 
-      const body = new URLSearchParams({
+      const jobCardBody = new URLSearchParams({
         sheetName: JOBCARDS_SHEET,
-        action: "updateColumns",
-        rowIndex: selectedProduction._rowIndex.toString(),
+        action: "updateByJobCard",
+        jobCardNo: jobCardNo,
         columnUpdates: JSON.stringify(columnUpdates),
       })
 
-      const res = await fetch(WEB_APP_URL, { method: "POST", body })
-      const result = await res.json()
+      const jobCardRes = await fetch(WEB_APP_URL, { method: "POST", body: jobCardBody })
+      const jobCardResult = await jobCardRes.json()
 
-      if (!result.success) {
-        throw new Error(result.error || "Failed to update Lab Test 1 data in JobCards sheet.")
+      if (!jobCardResult.success) {
+        throw new Error(jobCardResult.error || "Failed to update Lab Test 1 data in JobCards sheet.")
       }
 
       alert("Lab Test 1 data saved successfully!")
       setIsDialogOpen(false)
       await loadAllData()
-    } catch (err: any) {
+    } catch (err) {
       setError(err.message)
       alert(`Error: ${err.message}`)
     } finally {
@@ -388,13 +495,13 @@ export default function LabTesting1Page() {
     }
   }
 
-  const handleToggleColumn = (tab: string, dataKey: string, checked: boolean) => {
+  const handleToggleColumn = (tab, dataKey, checked) => {
     const setter = tab === "pending" ? setVisiblePendingColumns : setVisibleHistoryColumns
     setter((prev) => ({ ...prev, [dataKey]: checked }))
   }
 
-  const handleSelectAllColumns = (tab: string, columnsMeta: any[], checked: boolean) => {
-    const newVisibility: Record<string, boolean> = {}
+  const handleSelectAllColumns = (tab, columnsMeta, checked) => {
+    const newVisibility = {}
     columnsMeta.forEach((col) => {
       if (col.toggleable) newVisibility[col.dataKey] = checked
     })
@@ -412,11 +519,9 @@ export default function LabTesting1Page() {
     [visibleHistoryColumns],
   )
 
-  const renderRawMaterials = (materials: RawMaterial[]) => {
+  const renderRawMaterials = (materials) => {
     if (!materials || materials.length === 0) return "-"
-    if (materials.length <= 2) {
-      return materials.map((m) => m.name).join(", ")
-    }
+
     return (
       <Button
         variant="outline"
@@ -430,7 +535,7 @@ export default function LabTesting1Page() {
     )
   }
 
-  const ColumnToggler = ({ tab, columnsMeta }: { tab: string; columnsMeta: any[] }) => (
+  const ColumnToggler = ({ tab, columnsMeta }) => (
     <Popover>
       <PopoverTrigger asChild>
         <Button variant="outline" size="sm" className="h-8 text-xs bg-transparent ml-auto">
@@ -558,7 +663,7 @@ export default function LabTesting1Page() {
                           pendingTests.map((production) => (
                             <TableRow key={production._rowIndex} className="hover:bg-purple-50/50">
                               {visiblePendingColumnsMeta.map((col) => (
-                                <TableCell key={col.dataKey} className="whitespace-nowrap text-sm">
+                                <TableCell key={col.dataKey} className="whitespace-nowrap text-sm py-2 px-3">
                                   {col.dataKey === "actionColumn" ? (
                                     <Button
                                       size="sm"
@@ -570,8 +675,10 @@ export default function LabTesting1Page() {
                                     </Button>
                                   ) : col.dataKey === "rawMaterials" ? (
                                     renderRawMaterials(production.rawMaterials)
+                                  ) : col.dataKey === "machineHours" ? (
+                                    formatMachineHours(production[col.dataKey])
                                   ) : (
-                                    production[col.dataKey as keyof ProductionItem] || "-"
+                                    production[col.dataKey] || "-"
                                   )}
                                 </TableCell>
                               ))}
@@ -622,7 +729,7 @@ export default function LabTesting1Page() {
                             <TableRow key={test._rowIndex} className="hover:bg-purple-50/50">
                               {visibleHistoryColumnsMeta.map((col) => (
                                 <TableCell key={col.dataKey} className="whitespace-nowrap text-sm">
-                                  {test[col.dataKey as keyof HistoryItem] || "-"}
+                                  {test[col.dataKey] || "-"}
                                 </TableCell>
                               ))}
                             </TableRow>
@@ -650,7 +757,6 @@ export default function LabTesting1Page() {
         </CardContent>
       </Card>
 
-      {/* Raw Materials Viewing Dialog */}
       <Dialog open={!!viewingMaterials} onOpenChange={(isOpen) => !isOpen && setViewingMaterials(null)}>
         <DialogContent>
           <DialogHeader>
@@ -678,7 +784,6 @@ export default function LabTesting1Page() {
         </DialogContent>
       </Dialog>
 
-      {/* Lab Testing Form Dialog */}
       <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
         <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
@@ -788,7 +893,7 @@ export default function LabTesting1Page() {
                   id="initialSettingTime"
                   type="text"
                   placeholder="e.g., 00:30:00"
-                  value={formData.initialSettingTime.h} // Use .h to store the string
+                  value={formData.initialSettingTime.h}
                   onChange={(e) => handleTimeInputChange("initialSettingTime", e.target.value)}
                   className={formErrors.initialSettingTime ? "border-red-500" : ""}
                 />
@@ -803,7 +908,7 @@ export default function LabTesting1Page() {
                   id="finalSettingTime"
                   type="text"
                   placeholder="e.g., 01:00:00"
-                  value={formData.finalSettingTime.h} // Use .h to store the string
+                  value={formData.finalSettingTime.h}
                   onChange={(e) => handleTimeInputChange("finalSettingTime", e.target.value)}
                   className={formErrors.finalSettingTime ? "border-red-500" : ""}
                 />
