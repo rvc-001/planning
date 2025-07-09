@@ -22,6 +22,6 @@
       "@/*": ["./*"]
     }
   },
-  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts", "app/production/page.tsx", "app/orders/page.tsx", "app/layout.tsx", "app/lab-testing2/page.tsx", "app/lab-testing1/page.jsx", "app/job-cards/page.tsx", "app/full-kitting/page.jsx", "app/check/page.tsx", "app/chemical-test/page.tsx", "app/page.tsx", "app/tally/page.tsx", "app/settings/page.tsx", "components/protected-route.jsx", "components/ui/accordion.jsx", "components/theme-provider.jsx", "components/footer.jsx", "components/app-sidebar.jsx", "components/login-form.tsx", "lib/auth.tsx"],
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts", "app/production/page.tsx", "app/orders/page.tsx", "app/layout.tsx", "app/lab-testing2/page.tsx", "app/lab-testing1/page.jsx", "app/job-cards/page.tsx", "app/full-kitting/page.tsx", "app/check/page.tsx", "app/chemical-test/page.tsx", "app/page.tsx", "app/tally/page.tsx", "app/settings/page.tsx", "components/protected-route.jsx", "components/ui/accordion.jsx", "components/theme-provider.jsx", "components/footer.jsx", "components/app-sidebar.jsx", "components/login-form.tsx", "lib/auth.tsx"],
   "exclude": ["node_modules"]
 }
