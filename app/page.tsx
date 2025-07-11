@@ -602,8 +602,7 @@ export default function ProductionDashboard() {
             </TabsTrigger>
           </TabsList>
           <TabsContent value="overview" className="space-y-6">
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-              <KpiCard title="Total Orders Recieved" value={dashboardMetrics.totalOrdersRecieved} icon={<PackageCheck size={20}/>} />
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
               <KpiCard title="Total Orders Processed" value={dashboardMetrics.totalOrdersProcessed} icon={<Factory size={20} />} />
               <KpiCard title="Total Pending Orders" value={dashboardMetrics.totalPendingOrders} icon={<ClipboardList size={20} />} />
               <KpiCard title="Job Cards Created" value={dashboardMetrics.jobCardsCreated} icon={<FileText size={20} />} />
